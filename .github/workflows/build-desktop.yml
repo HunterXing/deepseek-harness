@@ -86,7 +86,8 @@ jobs:
           # 模板里全空的签名字段保持为空 => --unsigned 产物。
           # 这些值都是本仓库自建的非敏感测试配置，**不含任何真实凭据**。
           # 注意：不要写本机代理（runner 上没有），否则下载会全部失败。
-          cp .env.macos.example apps/desktop/.env.macos
+          # 模板在 apps/desktop/ 下，不在仓库根 —— 写错路径会 cp 失败
+          cp apps/desktop/.env.macos.example apps/desktop/.env.macos
           cat >> apps/desktop/.env.macos <<'ENVEOF'
           DSH_DESKTOP_APP_ID=com.deepseek.harness.local
           DSH_DESKTOP_AUTO_UPDATE_ENV=test
