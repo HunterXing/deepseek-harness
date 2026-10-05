@@ -101,6 +101,26 @@ jobs:
           echo "写入的配置："
           grep -vE '^\s*#|^\s*$' apps/desktop/.env.macos | tail -9
 
+      - name: 准备 .env.windows
+        if: matrix.platform == 'Windows'
+        shell: bash
+        run: |
+          # 与 macOS 同理：模板在 apps/desktop/ 下，不在仓库根。
+          # 签名字段保持为空 —— win-x64 --unsigned 是上游自带的免凭据路径。
+          cp apps/desktop/.env.windows.example apps/desktop/.env.windows
+          cat >> apps/desktop/.env.windows <<'ENVEOF'
+          DSH_DESKTOP_APP_ID=com.deepseek.harness.local
+          DSH_DESKTOP_AUTO_UPDATE_ENV=test
+          DOWNLOAD_TEST_ORIGIN=https://download.deepseek.com
+          DOWNLOAD_TEST_RELEASE_ID=b5d774e5197c64a963fffb69350e0edb
+          DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN=https://download.deepseek.com
+          DSH_DESKTOP_MANDATORY_UPDATE_PROD_ORIGIN=https://download.deepseek.com
+          DSH_DESKTOP_MANDATORY_UPDATE_CONFIG='{"allowedAuthOrigins":["https://login.example.com"]}'
+          DSH_DESKTOP_WINDOWS_SIGNATURE_CACHE_CONCURRENCY=4
+          ENVEOF
+          echo "写入的配置："
+          grep -vE '^\s*#|^\s*$' apps/desktop/.env.windows | tail -9
+
       - name: 免签名补丁（构建期应用，产物生成后工作树不保留）
         if: matrix.platform == 'macOS'
         shell: bash
