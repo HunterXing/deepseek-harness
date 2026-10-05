@@ -55,7 +55,7 @@ jobs:
     timeout-minutes: 90
     # workflow_dispatch 勾选了部分目标时，未选中的在 job 级就跳过，
     # 连 runner 都不分配。push 触发时 inputs.targets 为空 → 三个全建。
-    if: ${{ inputs.targets == '' || contains(fromJSON(format('["{0}"]', inputs.targets)), matrix.target) }}
+    if: ${{ github.event_name != 'workflow_dispatch' || contains(fromJSON(format('["{0}"]', inputs.targets || '[]')), matrix.target) }}
 
     steps:
       - uses: actions/checkout@v4
@@ -81,6 +81,7 @@ jobs:
         run: npm install -g pnpm@11.7.0
 
       - name: 准备 .env.macos
+        if: matrix.platform == 'macOS'
         shell: bash
         run: |
           # 模板里全空的签名字段保持为空 => --unsigned 产物。
@@ -101,6 +102,7 @@ jobs:
           grep -vE '^\s*#|^\s*$' apps/desktop/.env.macos | tail -9
 
       - name: 免签名补丁（构建期应用，产物生成后工作树不保留）
+        if: matrix.platform == 'macOS'
         shell: bash
         run: |
           # 上游一旦改动这 4 个脚本，这里会响亮失败——这是刻意设计：
@@ -132,7 +134,8 @@ jobs:
             *) echo "未知目标"; exit 1 ;;
           esac
 
-      - name: 收集产物
+      - name: 收集产物（macOS）
+        if: matrix.platform == 'macOS'
         shell: bash
         run: |
           set -euo pipefail
@@ -151,7 +154,8 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent "$APP" "$OUT"
           ls -la "$OUT"
 
-      - name: 收集产物
+      - name: 收集产物（Windows）
+        if: matrix.platform == 'Windows'
         shell: bash
         run: |
           set -euo pipefail
@@ -165,7 +169,6 @@ jobs:
           ls -la out/
 
       - uses: actions/upload-artifact@v4
-        if: ${{ inputs.targets == '' || contains(fromJSON(format('["{0}"]', inputs.targets)), matrix.target }}
         with:
           name: dsh-${{ matrix.target }}
           path: out/
