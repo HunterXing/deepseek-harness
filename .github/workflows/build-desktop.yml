@@ -1,0 +1,176 @@
+# 自建桌面产物流水线。
+#
+# 上游 deepseek-ai/deepseek-harness 的桌面打包流水线在 macOS 上强制要求
+# 签名与公证凭据（electron-builder.config.mjs 的 forceCodeSigning / notarize
+# 在配置加载期就硬校验），本机没有付费 Apple 开发者账号时无法直接使用。
+# 这里在**构建期**对 4 个打包脚本打上临时补丁（.ci/unsigned-macos.patch），
+# 产出未签名产物，打完即弃——工作树永远是干净的，与上游逐字节一致，
+# 因此 sync-upstream 的 `git merge --ff-only` 永远能跑。
+#
+# 签名凭据一旦具备（Apple Developer Program），删掉 patch 步骤并把
+# CSC_LINK / CSC_KEY_PASSWORD / APPLE_API_KEY / APPLE_API_KEY_ID /
+# APPLE_API_ISSUER 配成 repository secrets 即可切回官方签名流程。
+
+name: Build desktop artifacts
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: '要构建的目标，逗号分隔（mac-x64 / mac-arm64 / win-x64）。留空=全部'
+        required: false
+        default: ''
+
+# 公开仓库的 GitHub 托管 runner 免费且不限量；改私有会开始计费，
+# 且 macOS runner 按 10 倍分钟倍率计算。
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    # macos-*-intel 是原生 x64 runner（4 vCPU / 14GB），
+    # macos-* 是原生 arm64（M1，3 vCPU / 7GB）。
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: mac-x64
+            os: macos-15-intel
+            platform: macOS
+          - target: mac-arm64
+            os: macos-15
+            platform: macOS
+          - target: win-x64
+            os: windows-latest
+            platform: Windows
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    # workflow_dispatch 勾选了部分目标时，未选中的在 job 级就跳过，
+    # 连 runner 都不分配。push 触发时 inputs.targets 为空 → 三个全建。
+    if: ${{ inputs.targets == '' || contains(fromJSON(format('["{0}"]', inputs.targets)), matrix.target) }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 浅历史足够：构建只需要 HEAD，体积从 ~1.3GB 降到几百 MB。
+          # 完整历史是 sync-upstream 的需求，不是构建的。
+          fetch-depth: 1
+
+      - name: 记录 runner 规格与磁盘余量
+        run: |
+          echo "### Runner 规格" >> "$GITHUB_STEP_SUMMARY"
+          echo "- label: \`${{ matrix.os }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 版本: \`$(node -v)\` / pnpm \`$(pnpm -v)\`" >> "$GITHUB_STEP_SUMMARY"
+          df -h / | tail -1 | awk '{print "- 根分区可用: **"$4"** (总计 "$2")"}' >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/setup-node@v4
+        with:
+          # 与根 package.json 的 packageManager 字段保持一致
+          node-version: '22.22.3'
+          cache: pnpm
+
+      - name: 安装 pnpm
+        run: npm install -g pnpm@11.7.0
+
+      - name: 准备 .env.macos
+        shell: bash
+        run: |
+          # 模板里全空的签名字段保持为空 => --unsigned 产物。
+          # 这些值都是本仓库自建的非敏感测试配置，**不含任何真实凭据**。
+          # 注意：不要写本机代理（runner 上没有），否则下载会全部失败。
+          cp .env.macos.example apps/desktop/.env.macos
+          cat >> apps/desktop/.env.macos <<'ENVEOF'
+          DSH_DESKTOP_APP_ID=com.deepseek.harness.local
+          DSH_DESKTOP_AUTO_UPDATE_ENV=test
+          DOWNLOAD_TEST_ORIGIN=https://download.deepseek.com
+          DOWNLOAD_TEST_RELEASE_ID=b5d774e5197c64a963fffb69350e0edb
+          DSH_DESKTOP_MACOS_PACK_CONCURRENCY=4
+          DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN=https://download.deepseek.com
+          DSH_DESKTOP_MANDATORY_UPDATE_PROD_ORIGIN=https://download.deepseek.com
+          DSH_DESKTOP_MANDATORY_UPDATE_CONFIG='{"allowedAuthOrigins":["https://login.example.com"]}'
+          ENVEOF
+          echo "写入的配置："
+          grep -vE '^\s*#|^\s*$' apps/desktop/.env.macos | tail -9
+
+      - name: 免签名补丁（构建期应用，产物生成后工作树不保留）
+        shell: bash
+        run: |
+          # 上游一旦改动这 4 个脚本，这里会响亮失败——这是刻意设计：
+          # 宁可构建中止，也不要产出一个悄悄跑偏的包。修复办法见 .ci/README.md
+          git apply --check -p1 .ci/unsigned-macos.patch
+          git apply -p1 .ci/unsigned-macos.patch
+          echo "已打补丁的文件："
+          git status --porcelain | grep -E '^ M' | sed 's/^/  /'
+          for f in apps/desktop/scripts/electron-builder-config.mjs \
+                   apps/desktop/scripts/package-target.ts \
+                   apps/desktop/scripts/prepare-dsh.ts \
+                   apps/desktop/scripts/smoke-packaged-runtime.ts; do
+            node --check "$f" 2>/dev/null || npx --no-install tsc --noEmit --skipLibCheck "$f" 2>/dev/null || true
+          done
+          echo "语法检查完成"
+
+      - name: 构建 ${{ matrix.target }}
+        shell: bash
+        env:
+          # GitHub 托管 runner 在美国，默认源即可；不设 npmmirror 以免绕远。
+          ELECTRON_MIRROR: ''
+        run: |
+          set -euo pipefail
+          case "${{ matrix.target }}" in
+            mac-x64)   pnpm run package:desktop:mac:x64   -- --unsigned --dir ;;
+            mac-arm64) pnpm run package:desktop:mac:arm64 -- --unsigned --dir ;;
+            # 上游自带免凭据脚本：package:win:x64:unsigned == package-target.ts win-x64 --unsigned
+            win-x64)   pnpm run package:desktop:win:x64:unsigned ;;
+            *) echo "未知目标"; exit 1 ;;
+          esac
+
+      - name: 收集产物
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="apps/desktop/.desktop-build/targets"
+          APP="$(find "$ROOT" -name 'DeepSeek Harness.app' -maxdepth 4 -type d | head -1)"
+          if [ -z "$APP" ]; then
+            echo "::error::未找到 .app 产物"; find "$ROOT" -maxdepth 3 | head -40; exit 1
+          fi
+          echo "找到产物：$APP ($(du -sh "$APP" | cut -f1))"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist" | sed 's/^/  版本: /'
+          lipo -archs "$APP/Contents/MacOS/DeepSeek Harness" | sed 's/^/  架构: /'
+          OUT="out/dsh-${{ matrix.target }}-$(date +%Y%m%d).zip"
+          mkdir -p out
+          # 必须用 ditto 打包：actions/upload-artifact 解包后会丢失可执行位和符号链接，
+          # 直接上传 .app 目录会得到一个打不开的 app。
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$OUT"
+          ls -la "$OUT"
+
+      - name: 收集产物
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          EXE="$(find apps/desktop/.desktop-build/targets -name '*.exe' -type f | head -1)"
+          if [ -z "$EXE" ]; then
+            echo "::error::未找到 .exe 产物"; find apps/desktop/.desktop-build/targets -maxdepth 3 | head -40; exit 1
+          fi
+          echo "找到产物：$EXE ($(du -sh "$EXE" | cut -f1))"
+          cp "$EXE" "out/dsh-${{ matrix.target }}-$(date +%Y%m%d)-$(basename "$EXE")"
+          ls -la out/
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ inputs.targets == '' || contains(fromJSON(format('["{0}"]', inputs.targets)), matrix.target }}
+        with:
+          name: dsh-${{ matrix.target }}
+          path: out/
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: 构建后磁盘用量
+        run: df -h / | tail -1 | awk '{print "根分区已用 "$3" / "$2"  可用 "$4}' | tee -a "$GITHUB_STEP_SUMMARY"

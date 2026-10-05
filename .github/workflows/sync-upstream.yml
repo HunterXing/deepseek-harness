@@ -1,0 +1,77 @@
+# 定时把 fork 快进到上游 master。
+#
+# 关键约束：fork 的工作树必须与上游**逐字节一致**，所以
+# 免签名补丁只以文件形式存放在 .ci/，由 build-desktop.yml 在构建期应用。
+# 这样每次同步都是一次干净的 `git merge --ff-only`，不会产生冲突。
+#
+# 仓库 pack 约 325MB。**必须 fetch-depth: 0** —— 浅克隆缺少祖先关系，
+# `git merge --ff-only upstream/master` 会直接失败
+# （本次实测：浅克隆后 merge-base 判不出祖先，被迫 --deepen 补历史）。
+
+name: Sync upstream
+
+on:
+  schedule:
+    # 每天 04:23 UTC（北京时间 12:23）。避开整点，减少与上游发布撞车。
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Fast-forward to upstream master
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0        # 见文件头说明：浅克隆会让 ff-only 失败
+
+      - name: 挂载 upstream
+        run: |
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream https://github.com/deepseek-ai/deepseek-harness.git
+
+      - name: 拉取上游 master
+        run: git fetch --no-tags upstream master
+
+      - name: 判断是否需要同步
+        id: check
+        run: |
+          if git merge-base --is-ancestor HEAD upstream/master; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "上游有新提交，将快进 $(git rev-list --count HEAD..upstream/master) 个 commit"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "上游无新提交，无需操作"
+          fi
+
+      - name: 快进合并
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          git merge --ff-only upstream/master
+          echo "同步后 HEAD: $(git log --oneline -1)"
+
+      - name: 推送
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          # 推 master 会触发 build-desktop.yml（它的 on.push 监听 master）
+          git push origin master
+
+      - name: 校验工作树干净（确认补丁没被误提交）
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::工作树不干净，.ci 补丁疑似被提交进源码树："
+            git status --porcelain
+            exit 1
+          fi
+          echo "工作树干净：免签名补丁仍只以文件形式存在，没有污染源码"
