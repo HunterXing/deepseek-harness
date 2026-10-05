@@ -17,11 +17,6 @@ on:
   push:
     branches: [master]
   workflow_dispatch:
-    inputs:
-      targets:
-        description: '要构建的目标，逗号分隔（mac-x64 / mac-arm64 / win-x64）。留空=全部'
-        required: false
-        default: ''
 
 # 公开仓库的 GitHub 托管 runner 免费且不限量；改私有会开始计费，
 # 且 macOS runner 按 10 倍分钟倍率计算。
@@ -53,9 +48,10 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
-    # workflow_dispatch 勾选了部分目标时，未选中的在 job 级就跳过，
-    # 连 runner 都不分配。push 触发时 inputs.targets 为空 → 三个全建。
-    if: ${{ github.event_name != 'workflow_dispatch' || contains(fromJSON(format('["{0}"]', inputs.targets || '[]')), matrix.target) }}
+    # 注意：这里**不能**加 job 级 if 来筛选目标。GitHub 在矩阵展开**之前**求值
+    # jobs.<id>.if，matrix 上下文尚不存在，会报
+    #   Unrecognized named-value: 'matrix'
+    # 需要按目标筛选只能在 step 级做（那里 matrix 可用）。
 
     steps:
       - uses: actions/checkout@v4
