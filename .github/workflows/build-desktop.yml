@@ -54,28 +54,31 @@ jobs:
     # 需要按目标筛选只能在 step 级做（那里 matrix 可用）。
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           # 浅历史足够：构建只需要 HEAD，体积从 ~1.3GB 降到几百 MB。
           # 完整历史是 sync-upstream 的需求，不是构建的。
           fetch-depth: 1
 
-      - name: 记录 runner 规格与磁盘余量
-        run: |
-          echo "### Runner 规格" >> "$GITHUB_STEP_SUMMARY"
-          echo "- label: \`${{ matrix.os }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- 版本: \`$(node -v)\` / pnpm \`$(pnpm -v)\`" >> "$GITHUB_STEP_SUMMARY"
-          df -h / | tail -1 | awk '{print "- 根分区可用: **"$4"** (总计 "$2")"}' >> "$GITHUB_STEP_SUMMARY"
+      - uses: pnpm/action-setup@v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          # 与根 package.json 的 packageManager 字段保持一致
           node-version: '22.22.3'
           cache: pnpm
 
-      - name: 安装 pnpm
-        run: npm install -g pnpm@11.7.0
+      - name: 记录 runner 规格与磁盘余量
+        shell: bash
+        run: |
+          echo "### Runner 规格" >> "$GITHUB_STEP_SUMMARY"
+          echo "- label: \`${{ matrix.os }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 目标: \`${{ matrix.target }}\`" >> "$GITHUB_STEP_SUMMARY"
+          node -e 'const os=require("os");console.log(`- 环境: \`${process.version}\` / ${os.platform()} ${os.arch()} / ${os.cpus().length} vCPU / ${(os.totalmem()/2**30).toFixed(1)}GB RAM`)' >> "$GITHUB_STEP_SUMMARY"
+          # df 在 Windows 的 git-bash 上不可靠，失败不阻断
+          df -h . 2>/dev/null | tail -1 | awk '{print "- 工作盘可用: **"$4"** (总计 "$2")"}' >> "$GITHUB_STEP_SUMMARY" || echo "- 磁盘信息不可用" >> "$GITHUB_STEP_SUMMARY"
 
+      # pnpm/action-setup 会读取根 package.json 的 packageManager 字段（pnpm@11.7.0），
+      # 必须在 setup-node 之前：setup-node 的 cache: pnpm 依赖 PATH 里已有 pnpm。
       - name: 准备 .env.macos
         if: matrix.platform == 'macOS'
         shell: bash
@@ -172,4 +175,6 @@ jobs:
           if-no-files-found: error
 
       - name: 构建后磁盘用量
-        run: df -h / | tail -1 | awk '{print "根分区已用 "$3" / "$2"  可用 "$4}' | tee -a "$GITHUB_STEP_SUMMARY"
+        if: always()
+        shell: bash
+        run: df -h . 2>/dev/null | tail -1 | awk '{print "工作盘已用 "$3" / "$2"  可用 "$4}' | tee -a "$GITHUB_STEP_SUMMARY" || echo "磁盘信息不可用" | tee -a "$GITHUB_STEP_SUMMARY"
