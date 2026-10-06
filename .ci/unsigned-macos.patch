@@ -1,5 +1,5 @@
---- a/apps/desktop/scripts/electron-builder-config.mjs
-+++ b/apps/desktop/scripts/electron-builder-config.mjs
+--- a/apps/desktop/scripts/electron-builder-config.mjs	2026-10-06 10:51:33
++++ b/apps/desktop/scripts/electron-builder-config.mjs	2026-10-06 10:51:33
 @@ -59,12 +59,10 @@
      throw new Error('desktop package: DSH_DESKTOP_UNSIGNED must be 0 or 1')
    }
@@ -62,8 +62,8 @@
        if (!artifact.file.endsWith('.dmg')) return
        return notarizeMacOSDiskImageArtifact(
          artifact,
---- a/apps/desktop/scripts/package-target.ts	2026-10-06 09:42:20
-+++ b/apps/desktop/scripts/package-target.ts	2026-10-06 09:42:20
+--- a/apps/desktop/scripts/package-target.ts	2026-10-06 10:51:33
++++ b/apps/desktop/scripts/package-target.ts	2026-10-06 10:51:33
 @@ -234,7 +234,7 @@
    })
    if (positionals.length > 1) throw new Error('desktop package: expected at most one target')
@@ -109,8 +109,8 @@
    } else {
      await signedStage('artifacts', () => execute(desktopElectronBuilderArguments(target, invocation.directory), electronBuilderEnv))
      await execute(['exec', 'tsx', 'scripts/smoke-packaged-runtime.ts', ...(invocation.unsigned ? ['--unsigned'] : [])], targetEnv)
---- a/apps/desktop/scripts/prepare-dsh.ts	2026-10-06 09:42:20
-+++ b/apps/desktop/scripts/prepare-dsh.ts	2026-10-06 09:42:20
+--- a/apps/desktop/scripts/prepare-dsh.ts	2026-10-06 10:51:33
++++ b/apps/desktop/scripts/prepare-dsh.ts	2026-10-06 10:51:33
 @@ -153,7 +153,7 @@
      if (!existsSync(join(DSH_OUTPUT_ROOT, 'node_modules', '@deepseek-ai', `libreoffice-kit-${officeEngine}`, 'prebuilds.json'))) {
        throw new Error(`desktop runtime: missing required LibreOffice engine ${officeEngine}`)
@@ -120,8 +120,8 @@
        await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'sign:dsh-native', () => signMacOSRuntime(DSH_OUTPUT_ROOT, resolveDesktopAppId(process.env), resolveMacOSSigningEnvironment(process.env), target.arch, join(BUILD_PATHS.root, 'signature-cache')))
        await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'sign:primary-native', () => signMacOSRuntime(join(RUNTIME_ROOT, 'primary-runtime'), resolveDesktopAppId(process.env), resolveMacOSSigningEnvironment(process.env), target.arch, join(BUILD_PATHS.root, 'signature-cache')))
      }
---- a/apps/desktop/scripts/smoke-packaged-runtime.ts	2026-10-06 09:42:20
-+++ b/apps/desktop/scripts/smoke-packaged-runtime.ts	2026-10-06 09:42:20
+--- a/apps/desktop/scripts/smoke-packaged-runtime.ts	2026-10-06 10:51:33
++++ b/apps/desktop/scripts/smoke-packaged-runtime.ts	2026-10-06 10:51:33
 @@ -11,7 +11,7 @@
  const { values } = parseArgs({ options: { unsigned: { type: 'boolean', default: false } }, allowPositionals: false })
  const target = resolveDesktopBuildTarget()
@@ -131,16 +131,19 @@
  const artifacts = values.unsigned ? paths.unsignedArtifacts : paths.artifacts
  const application = windows ? join(artifacts, 'win-unpacked')
    : join(artifacts, target === 'mac-arm64' ? 'mac-arm64' : 'mac', 'DeepSeek Harness.app', 'Contents')
---- a/apps/desktop/scripts/desktop-auto-update-environment.mjs	2026-10-06 09:42:20
-+++ b/apps/desktop/scripts/desktop-auto-update-environment.mjs	2026-10-06 09:42:20
-@@ -137,6 +137,24 @@
+--- a/apps/desktop/scripts/desktop-auto-update-environment.mjs	2026-10-06 10:51:33
++++ b/apps/desktop/scripts/desktop-auto-update-environment.mjs	2026-10-06 10:51:33
+@@ -137,6 +137,27 @@
      if (originEnvName === undefined) throw new Error('desktop auto-update: selected deployment has no origin')
      origin = httpsOrigin(requiredEnvironmentValue(env, originEnvName), originEnvName)
    }
 +  // [dsh-local] 允许直接指定扁平 feed 地址。GitHub Release 的附件是平铺的，
 +  // 没有 dsh-desk/<releaseId>/feeds/<target>/ 这类目录层级，而 origin 校验又要求
 +  // pathname === '/'。设了这个变量就直接用它当 publicUrl，跳过 origin/前缀拼装。
++  // [dsh-local] 默认指向自建仓库的固定 Release（每个架构一个 tag，附件平铺，正好当 feed）。
++  // 允许用环境变量覆盖；此时 target 已在作用域内（mac-x64 / mac-arm64 / win-x64）。
 +  const feedUrlOverride = env.DSH_DESKTOP_UPDATE_FEED_URL
++    ?? `https://github.com/HunterXing/deepseek-harness/releases/download/ci-${target}/`
 +  if (feedUrlOverride !== undefined && feedUrlOverride !== '') {
 +    const override = new URL(feedUrlOverride)
 +    if (override.protocol !== 'https:' || !override.pathname.endsWith('/')) {
