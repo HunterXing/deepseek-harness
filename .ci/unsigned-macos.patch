@@ -161,3 +161,109 @@
    let releasePrefix = 'dsh-desk'
    if (environment === 'test') {
      const releaseId = requiredEnvironmentValue(env, 'DOWNLOAD_TEST_RELEASE_ID')
+--- a/apps/desktop/src/update-coordinator.ts	2026-10-06 12:58:53
++++ b/apps/desktop/src/update-coordinator.ts	2026-10-06 12:58:53
+@@ -6,6 +6,7 @@
+ import electronUpdater, { type AppUpdater, type ProgressInfo, type UpdateInfo } from 'electron-updater'
+ import { gt, valid } from 'semver'
+ import type { DesktopUpdateState } from './ipc.ts'
++import { quitInstallByReplacingBundle } from './update-replace.ts'
+ import { DesktopUpdateHttpExecutor } from './update-http-executor.ts'
+ import { DesktopUpdatePreparationError } from './update-error.ts'
+ 
+@@ -134,7 +135,9 @@
+       try {
+         if (!await this.beforeRestart()) return this.setState({ phase: 'ready', version })
+         this.assertLive()
+-        this.updater.quitAndInstall(true, true)
++        // [dsh-local] Squirrel.Mac 无法完成本 bundle 的替换，改由自研脚本在退出后执行。
++        quitInstallByReplacingBundle(process.pid)
++        app.quit()
+         return this.current
+       } catch (error) {
+         if (this.current.phase === 'error' && this.current.failedOperation === 'install') return this.current
+--- a/apps/desktop/src/update-replace.ts	2026-10-06 12:58:53
++++ b/apps/desktop/src/update-replace.ts	2026-10-06 12:58:53
+@@ -0,0 +1,82 @@
++/**
++ * [dsh-local] Replace the installed bundle ourselves instead of letting Squirrel.Mac do it.
++ *
++ * Squirrel.Mac is a long-unmaintained native helper. On this unsigned ~1 GB Electron bundle it
++ * downloads and verifies correctly, but its final "move the old bundle aside, unzip the new one,
++ * relaunch" step leaves the install half-applied: the app relaunches, the Desktop Host fails to
++ * come up (`dsh-desktop:boot: Desktop Host is unavailable`), and `pending/` is never cleared.
++ *
++ * A detached shell performs the swap after the current process exits, which `ditto` does reliably.
++ */
++import { spawn } from 'node:child_process'
++import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync } from 'node:fs'
++import { homedir } from 'node:os'
++import { dirname, join } from 'node:path'
++
++/** Electron's `process.resourcesPath` is `<bundle>/Contents/Resources`. */
++function bundlePath(): string {
++  return dirname(dirname(dirname(process.resourcesPath)))
++}
++
++/** `updaterCacheDirName` comes from the app-update.yml electron-updater wrote at packaging time. */
++function updaterCacheDir(): string | undefined {
++  const config = join(process.resourcesPath, 'app-update.yml')
++  if (!existsSync(config)) return undefined
++  const match = /^updaterCacheDirName:\s*'?([^'\n]+)'?\s*$/mu.exec(readFileSync(config, 'utf8'))
++  return match?.[1]
++}
++
++/** The zip electron-updater already downloaded and verified. */
++function downloadedArchive(cacheName: string): string | undefined {
++  const root = join(homedir(), 'Library', 'Caches', cacheName)
++  for (const folder of [join(root, 'pending'), root]) {
++    if (!existsSync(folder)) continue
++    for (const entry of readdirSync(folder)) {
++      if (entry.toLowerCase().endsWith('.zip')) return join(folder, entry)
++    }
++  }
++  return undefined
++}
++
++/**
++ * Hand the swap to a detached shell; the caller then quits the current process.
++ *
++ * The helper waits for this PID to disappear before touching the bundle, extracts the verified
++ * archive, writes it over the installed copy, and reopens it. `ditto` merges into the existing
++ * bundle rather than removing it first, so an interrupted run leaves a still-launchable app
++ * instead of a half-deleted one.
++ */
++export function quitInstallByReplacingBundle(currentPid: number): void {
++  const bundle = bundlePath()
++  const cacheName = updaterCacheDir()
++  if (cacheName === undefined) throw new Error('desktop update: app-update.yml has no updaterCacheDirName')
++  const archive = downloadedArchive(cacheName)
++  if (archive === undefined) throw new Error('desktop update: no verified archive in the updater cache')
++
++  const script = join(homedir(), 'Library', 'Caches', cacheName, `replace-${currentPid}.sh`)
++  mkdirSync(dirname(script), { recursive: true })
++  const lines = [
++    '#!/bin/sh',
++    'set -e',
++    '# Wait for the running app to exit (up to 120s), then swap and reopen.',
++    'i=0',
++    `while kill -0 ${currentPid} 2>/dev/null; do`,
++    '  i=$((i+1)); [ "$i" -gt 1200 ] && exit 1',
++    '  sleep 0.1',
++    'done',
++    'sleep 1',
++    'WORK=$(mktemp -d)',
++    `ditto -x -k "${archive}" "$WORK"`,
++    `NEW=$(find "$WORK" -maxdepth 1 -name '*.app' -type d | head -1)`,
++    '[ -n "$NEW" ] || exit 1',
++    `ditto "$NEW" "${bundle}"`,
++    'rm -rf "$WORK"',
++    `open "${bundle}"`,
++    'rm -f "$0"',
++    '',
++  ]
++  writeFileSync(script, lines.join('\n'), { mode: 0o700 })
++
++  const child = spawn('/bin/sh', [script], { detached: true, stdio: 'ignore' })
++  child.unref()
++}
