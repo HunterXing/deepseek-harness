@@ -1,12 +1,20 @@
-# 定时把 fork 快进到上游 master。
+# 定时把 fork rebase 到上游 master。
 #
-# 关键约束：fork 的工作树必须与上游**逐字节一致**，所以
-# 免签名补丁只以文件形式存放在 .ci/，由 build-desktop.yml 在构建期应用。
-# 这样每次同步都是一次干净的 `git merge --ff-only`，不会产生冲突。
+# 为什么是 rebase 而不是 fast-forward：
+# fork 的 master 上有若干个「只属于本 fork」的 commit（.ci/ 与两个 workflow），
+# 它们**永远不可能出现在上游**，所以 upstream/master 永远不会是 fork HEAD 的祖先，
+# `git merge --ff-only upstream/master` 一旦上游前进就会失败。
+# 早期版本用 `merge-base --is-ancestor HEAD upstream/master` 判空，方向恰好反了：
+# 上游一前进它就返回 false，workflow 判定「无新提交」而**静默跳过**，
+# run 仍显示 success —— 同步就此悄悄失效，且没有任何报错。
 #
-# 仓库 pack 约 325MB。**必须 fetch-depth: 0** —— 浅克隆缺少祖先关系，
-# `git merge --ff-only upstream/master` 会直接失败
-# （本次实测：浅克隆后 merge-base 判不出祖先，被迫 --deepen 补历史）。
+# 为什么不会冲突：本地 commit 只触碰 4 个路径，上游一个都没有
+#   .ci/unsigned-macos.patch
+#   .ci/README.md
+#   .github/workflows/build-desktop.yml
+#   .github/workflows/sync-upstream.yml
+# rebase 只是把它们原样重放到新上游之上，天然无冲突。
+# 万一上游真的新增了同名路径，rebase 会**响亮失败**，这正是我们要的。
 
 name: Sync upstream
 
@@ -25,53 +33,65 @@ concurrency:
 
 jobs:
   sync:
-    name: Fast-forward to upstream master
+    name: Rebase onto upstream master
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: master
-          fetch-depth: 0        # 见文件头说明：浅克隆会让 ff-only 失败
+          # 必须完整历史：rebase 需要共同祖先，浅克隆会直接失败
+          # （本仓库 pack 约 325MB）
+          fetch-depth: 0
+          persist-credentials: true
 
       - name: 挂载 upstream
         run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git remote remove upstream 2>/dev/null || true
           git remote add upstream https://github.com/deepseek-ai/deepseek-harness.git
 
       - name: 拉取上游 master
         run: git fetch --no-tags upstream master
 
-      - name: 判断是否需要同步
+      - name: 判断上游是否前进
         id: check
         run: |
-          if git merge-base --is-ancestor HEAD upstream/master; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-            echo "上游有新提交，将快进 $(git rev-list --count HEAD..upstream/master) 个 commit"
-          else
+          # 方向必须是「upstream/master 是否已在我的 HEAD 里」。
+          # 写反会导致上游一有更新就静默跳过（这是本文件修复的第一个 bug）。
+          if git merge-base --is-ancestor upstream/master HEAD; then
+            echo "  上游无新提交，fork 已是最新"
             echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "上游无新提交，无需操作"
+          else
+            BASE=$(git merge-base HEAD upstream/master)
+            N=$(git rev-list --count "$BASE"..upstream/master)
+            echo "  上游新增 $N 个 commit，将把本 fork 的 commit rebase 到其上"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: 快进合并
+      - name: rebase
         if: steps.check.outputs.changed == 'true'
         run: |
           set -euo pipefail
-          git merge --ff-only upstream/master
+          git rebase upstream/master
           echo "同步后 HEAD: $(git log --oneline -1)"
+          echo "本 fork 自己的 commit 数: $(git rev-list --count upstream/master..HEAD)"
+
+      - name: 校验 CI 文件仍在且工作树干净
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          for p in .ci/unsigned-macos.patch .ci/README.md \
+                   .github/workflows/build-desktop.yml .github/workflows/sync-upstream.yml; do
+            [ -f "$p" ] || { echo "::error::rebase 后丢失 $p"; exit 1; }
+          done
+          [ -z "$(git status --porcelain)" ] || { echo "::error::工作树不干净"; git status --porcelain; exit 1; }
+          echo "  4 个 CI 文件完好，工作树干净"
 
       - name: 推送
         if: steps.check.outputs.changed == 'true'
-        run: |
-          # 推 master 会触发 build-desktop.yml（它的 on.push 监听 master）
-          git push origin master
-
-      - name: 校验工作树干净（确认补丁没被误提交）
-        run: |
-          if [ -n "$(git status --porcelain)" ]; then
-            echo "::error::工作树不干净，.ci 补丁疑似被提交进源码树："
-            git status --porcelain
-            exit 1
-          fi
-          echo "工作树干净：免签名补丁仍只以文件形式存在，没有污染源码"
+        # rebase 会重写历史，必须 force；但用 --force-with-lease，
+        # 若远端在我 fetch 之后被别人推过就拒绝，避免覆盖他人改动。
+        run: git push --force-with-lease origin master
