@@ -127,16 +127,41 @@ jobs:
       - name: 免签名补丁（构建期应用，产物生成后工作树不保留）
         shell: bash
         run: |
+          set -euo pipefail
           # 三个平台都要打：补丁里的 desktop-auto-update-environment.mjs 提供了按 target
           # 推导的 feed 默认值，Windows 同样依赖它，且该文件是 SHARED_SETTING 白名单
           # 不允许通过 .env 注入的。仓库 .gitattributes 强制 eol=lf，Windows 上
           # checkout 出来的就是 LF，git apply 不会因 CRLF 失败。
           # 上游一旦改动这 8 个文件，这里会响亮失败——这是刻意设计：
           # 宁可构建中止，也不要产出一个悄悄跑偏的包。修复办法见 .ci/README.md
+          # set -e 是关键：没有它，git apply 失败后步骤照样「成功」，
+          # 构建会带着未打补丁的源码跑完，产出一个看起来正常但功能缺失的包。
           git apply --check -p1 .ci/unsigned-macos.patch
           git apply -p1 .ci/unsigned-macos.patch
           echo "已打补丁的文件："
-          git status --porcelain | grep -E '^ M' | sed 's/^/  /'
+          git status --porcelain | grep -E '^( M|\?\?)' | sed 's/^/  /'
+          # 逐个核对补丁声明的 9 个路径。不能用「数一下有多少个改动文件」代替：
+          # 新增的 update-replace.ts 在 git status 里是 ?? 而不是 M，
+          # 计数会把补丁整体少算一个，断言自己就成了摆设。
+          MISSING=0
+          for f in apps/desktop/scripts/desktop-auto-update-environment.mjs \
+                   apps/desktop/scripts/electron-builder-config.mjs \
+                   apps/desktop/scripts/package-target.ts \
+                   apps/desktop/scripts/prepare-dsh.ts \
+                   apps/desktop/scripts/prepare-package-set.ts \
+                   apps/desktop/scripts/smoke-packaged-runtime.ts \
+                   apps/desktop/src/main.ts \
+                   apps/desktop/src/update-coordinator.ts \
+                   apps/desktop/src/update-replace.ts; do
+            if ! git status --porcelain -- "$f" | grep -q .; then
+              echo "::error::补丁没有改动 $f"
+              MISSING=$((MISSING + 1))
+            fi
+          done
+          if [ "$MISSING" -ne 0 ]; then
+            echo "::error::补丁声明的 9 个文件里有 $MISSING 个未被改动，补丁与预期不符"
+            exit 1
+          fi
           for f in apps/desktop/scripts/electron-builder-config.mjs \
                    apps/desktop/scripts/package-target.ts \
                    apps/desktop/scripts/prepare-dsh.ts \
@@ -207,6 +232,14 @@ jobs:
           # 直接上传 .app 目录会得到一个打不开的 app。
           ditto -c -k --sequesterRsrc --keepParent "$APP" "$OUT"
 
+          # 差分更新需要 blockmap。electron-updater 的 MacUpdater 只有拿到
+          # <artifact>.blockmap 才会走 differentialDownloadInstaller，否则整包重下；
+          # 而构建走 --dir + ditto，electron-builder 自己没产 zip，也就不会附带它。
+          # 生成的 .blockmap 与 zip 一起上传，electron-updater 按
+          # <files[].url>.blockmap 定位，文件名对得上。
+          node .ci/make-blockmap.mjs "$OUT"
+          test -s "$OUT.blockmap" || { echo "::error::blockmap 未生成"; exit 1; }
+
           # 生成 electron-updater 读取的清单。Squirrel.Mac 会按 sha512 校验下载到的 zip，
           # 字段名/层级必须与 electron-builder 产出的一致。
           NAME=$(basename "$OUT")
@@ -255,6 +288,17 @@ jobs:
           # 替换成旧版本号来定位上一版的 blockmap。
           NAME="dsh-${{ matrix.target }}-${VER}.exe"
           cp "$EXE" "out/$NAME"
+          # NSIS 自己会产 <exe>.blockmap，NsisUpdater 靠它做差分下载；
+          # 清单里缺 blockMapSize 时它会直接跳过差分，退化成整包下载。
+          BMAP_SRC="$(dirname "$EXE")/$(basename "$EXE").blockmap"
+          BMAP_SIZE=0
+          if [ -f "$BMAP_SRC" ]; then
+            cp "$BMAP_SRC" "out/$NAME.blockmap"
+            BMAP_SIZE=$(stat -c '%s' "out/$NAME.blockmap" 2>/dev/null || wc -c < "out/$NAME.blockmap")
+            echo "blockmap: $NAME.blockmap  $BMAP_SIZE 字节"
+          else
+            echo "::warning::NSIS 未产出 blockmap，本次更新将走整包下载"
+          fi
           FEED="https://github.com/HunterXing/deepseek-harness/releases/download/ci-${{ matrix.target }}/"
           SHA=$(openssl dgst -sha512 -binary "out/$NAME" | openssl base64 -A)
           SIZE=$(stat -c '%s' "out/$NAME" 2>/dev/null || wc -c < "out/$NAME")
@@ -264,6 +308,7 @@ jobs:
             - url: ${FEED}$NAME
               sha512: $SHA
               size: $SIZE
+              blockMapSize: $BMAP_SIZE
           path: $NAME
           sha512: $SHA
           releaseDate: '$(date -u +%Y-%m-%dT%H:%M:%S.000Z)'
@@ -322,11 +367,19 @@ jobs:
           set -euo pipefail
           # 从清单读，而不是仓库 package.json —— 后者是 productVersion，
           # 少了构建后缀，Release 标题会长期显示一个比产物旧的版本。
-          YML=$(ls dist/latest-mac.yml dist/latest.yml 2>/dev/null | head -1)
+          # 逐个判断存在性，不用 `ls a b`：只要其中任意一个不存在，ls 就返回 2，
+          # 而 set -e 会在命令替换处直接中止整个步骤，后面的空值检查根本走不到。
+          YML=""
+          for candidate in dist/latest-mac.yml dist/latest.yml; do
+            if [ -f "$candidate" ]; then YML="$candidate"; break; fi
+          done
           if [ -z "$YML" ]; then
             echo "::error::产物里没有 electron-updater 清单"; ls -la dist/; exit 1
           fi
           VER=$(grep -m1 '^version:' "$YML" | awk '{print $2}')
+          if [ -z "$VER" ]; then
+            echo "::error::清单 $YML 里没有 version 行"; exit 1
+          fi
           echo "清单: $YML"
           echo "构建版本: $VER"
           echo "version=$VER" >> "$GITHUB_OUTPUT"
