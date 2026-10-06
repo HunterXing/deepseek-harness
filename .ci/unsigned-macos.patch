@@ -14,7 +14,17 @@
    const buildPaths = desktopTargetBuildPaths(resolveDesktopBuildTarget(env, hostPlatform, hostArch))
    let primaryRuntimeDestination
    let dshDestination
-@@ -153,18 +151,18 @@
+@@ -90,7 +88,8 @@
+   if (windowsSigner !== undefined) {
+     installWindowsNsisBootstrapSigner({ sign: windowsSigner })
+   }
+-  const update = unsigned ? undefined : resolveDesktopAutoUpdateConfig(env, resolvedPlatform, resolvedArch)
++  // [dsh-local] 未签名构建也要写出 app-update.yml，否则内置更新器因 enabled() 判空而整体停用。
++  const update = resolveDesktopAutoUpdateConfig(env, resolvedPlatform, resolvedArch)
+   if (preparedRuntime !== undefined) buildPaths.dsh = preparedRuntime
+   // electron-builder merges extraMetadata into the packaged manifest, so a build version here reaches
+   // the artifact names, the update feed, and the installed app.getVersion() the updater compares against.
+@@ -153,18 +152,18 @@
        // macOS matches the application locale against this bundle, not Electron Framework resources.
        extendInfo: { CFBundleLocalizations: ['en', 'zh_CN'] },
        identity: macOSSigning?.signingIdentity,
@@ -36,7 +46,7 @@
        writeUpdateInfo: false,
      },
      beforePack: async context => {
-@@ -196,6 +194,7 @@
+@@ -196,6 +195,7 @@
        if (packagesWindows && unsigned) await verifyWindowsAsarUnpack(buildPaths.dsh, resourcesDir, windowsCode)
      },
      afterSign: async context => {
@@ -44,7 +54,7 @@
        if (windowsSigner !== undefined) {
          await signWindowsCode(context.appOutDir, {
            thumbprint: new X509Certificate(await readFile(env.DSH_DESKTOP_WINDOWS_CER_FILE)).fingerprint.replaceAll(':', ''),
-@@ -213,6 +212,7 @@
+@@ -213,6 +213,7 @@
        verifyMacOSSignatureAfterSign(context, macOSSigning ?? resolveMacOSSigningEnvironment(env))
      },
      artifactBuildCompleted: artifact => {
@@ -52,8 +62,8 @@
        if (!artifact.file.endsWith('.dmg')) return
        return notarizeMacOSDiskImageArtifact(
          artifact,
---- a/apps/desktop/scripts/package-target.ts
-+++ b/apps/desktop/scripts/package-target.ts
+--- a/apps/desktop/scripts/package-target.ts	2026-10-06 09:42:20
++++ b/apps/desktop/scripts/package-target.ts	2026-10-06 09:42:20
 @@ -234,7 +234,7 @@
    })
    if (positionals.length > 1) throw new Error('desktop package: expected at most one target')
@@ -99,8 +109,8 @@
    } else {
      await signedStage('artifacts', () => execute(desktopElectronBuilderArguments(target, invocation.directory), electronBuilderEnv))
      await execute(['exec', 'tsx', 'scripts/smoke-packaged-runtime.ts', ...(invocation.unsigned ? ['--unsigned'] : [])], targetEnv)
---- a/apps/desktop/scripts/prepare-dsh.ts
-+++ b/apps/desktop/scripts/prepare-dsh.ts
+--- a/apps/desktop/scripts/prepare-dsh.ts	2026-10-06 09:42:20
++++ b/apps/desktop/scripts/prepare-dsh.ts	2026-10-06 09:42:20
 @@ -153,7 +153,7 @@
      if (!existsSync(join(DSH_OUTPUT_ROOT, 'node_modules', '@deepseek-ai', `libreoffice-kit-${officeEngine}`, 'prebuilds.json'))) {
        throw new Error(`desktop runtime: missing required LibreOffice engine ${officeEngine}`)
@@ -110,8 +120,8 @@
        await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'sign:dsh-native', () => signMacOSRuntime(DSH_OUTPUT_ROOT, resolveDesktopAppId(process.env), resolveMacOSSigningEnvironment(process.env), target.arch, join(BUILD_PATHS.root, 'signature-cache')))
        await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'sign:primary-native', () => signMacOSRuntime(join(RUNTIME_ROOT, 'primary-runtime'), resolveDesktopAppId(process.env), resolveMacOSSigningEnvironment(process.env), target.arch, join(BUILD_PATHS.root, 'signature-cache')))
      }
---- a/apps/desktop/scripts/smoke-packaged-runtime.ts
-+++ b/apps/desktop/scripts/smoke-packaged-runtime.ts
+--- a/apps/desktop/scripts/smoke-packaged-runtime.ts	2026-10-06 09:42:20
++++ b/apps/desktop/scripts/smoke-packaged-runtime.ts	2026-10-06 09:42:20
 @@ -11,7 +11,7 @@
  const { values } = parseArgs({ options: { unsigned: { type: 'boolean', default: false } }, allowPositionals: false })
  const target = resolveDesktopBuildTarget()
@@ -121,3 +131,30 @@
  const artifacts = values.unsigned ? paths.unsignedArtifacts : paths.artifacts
  const application = windows ? join(artifacts, 'win-unpacked')
    : join(artifacts, target === 'mac-arm64' ? 'mac-arm64' : 'mac', 'DeepSeek Harness.app', 'Contents')
+--- a/apps/desktop/scripts/desktop-auto-update-environment.mjs	2026-10-06 09:42:20
++++ b/apps/desktop/scripts/desktop-auto-update-environment.mjs	2026-10-06 09:42:20
+@@ -137,6 +137,24 @@
+     if (originEnvName === undefined) throw new Error('desktop auto-update: selected deployment has no origin')
+     origin = httpsOrigin(requiredEnvironmentValue(env, originEnvName), originEnvName)
+   }
++  // [dsh-local] 允许直接指定扁平 feed 地址。GitHub Release 的附件是平铺的，
++  // 没有 dsh-desk/<releaseId>/feeds/<target>/ 这类目录层级，而 origin 校验又要求
++  // pathname === '/'。设了这个变量就直接用它当 publicUrl，跳过 origin/前缀拼装。
++  const feedUrlOverride = env.DSH_DESKTOP_UPDATE_FEED_URL
++  if (feedUrlOverride !== undefined && feedUrlOverride !== '') {
++    const override = new URL(feedUrlOverride)
++    if (override.protocol !== 'https:' || !override.pathname.endsWith('/')) {
++      throw new Error('desktop auto-update: DSH_DESKTOP_UPDATE_FEED_URL must be an https URL ending with /')
++    }
++    return {
++      environment,
++      target,
++      origin: override.origin,
++      keyPrefix: `${target}/feeds`,
++      binaryKeyPrefix: `${target}/bin`,
++      publicUrl: feedUrlOverride,
++    }
++  }
+   let releasePrefix = 'dsh-desk'
+   if (environment === 'test') {
+     const releaseId = requiredEnvironmentValue(env, 'DOWNLOAD_TEST_RELEASE_ID')
