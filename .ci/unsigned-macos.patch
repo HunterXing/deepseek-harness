@@ -1,139 +1,8 @@
---- a/apps/desktop/scripts/electron-builder-config.mjs	2026-10-06 15:37:36
-+++ b/apps/desktop/scripts/electron-builder-config.mjs	2026-10-06 15:37:36
-@@ -59,12 +59,10 @@
-     throw new Error('desktop package: DSH_DESKTOP_UNSIGNED must be 0 or 1')
-   }
-   const unsigned = env.DSH_DESKTOP_UNSIGNED === '1'
--  if (unsigned && resolvedPlatform !== 'win32') throw new Error('desktop package: unsigned builds require Windows')
-   const packagesMacOS = targetPlatform === 'darwin' || (targetPlatform === undefined && hostPlatform === 'darwin')
-   const packagesWindows = resolvedPlatform === 'win32'
-   if (resolvedPlatform === 'win32') installWindowsDirectoryInstaller()
--  const macOSSigning = packagesMacOS ? resolveMacOSSigningEnvironment(env) : undefined
--  if (packagesMacOS) resolveMacOSNotarizationEnvironment(env)
-+  const macOSSigning = packagesMacOS && !unsigned ? resolveMacOSSigningEnvironment(env) : undefined
-   const buildPaths = desktopTargetBuildPaths(resolveDesktopBuildTarget(env, hostPlatform, hostArch))
-   let primaryRuntimeDestination
-   let dshDestination
-@@ -90,7 +88,8 @@
-   if (windowsSigner !== undefined) {
-     installWindowsNsisBootstrapSigner({ sign: windowsSigner })
-   }
--  const update = unsigned ? undefined : resolveDesktopAutoUpdateConfig(env, resolvedPlatform, resolvedArch)
-+  // [dsh-local] 未签名构建也要写出 app-update.yml，否则内置更新器因 enabled() 判空而整体停用。
-+  const update = resolveDesktopAutoUpdateConfig(env, resolvedPlatform, resolvedArch)
-   if (preparedRuntime !== undefined) buildPaths.dsh = preparedRuntime
-   // electron-builder merges extraMetadata into the packaged manifest, so a build version here reaches
-   // the artifact names, the update feed, and the installed app.getVersion() the updater compares against.
-@@ -153,18 +152,18 @@
-       // macOS matches the application locale against this bundle, not Electron Framework resources.
-       extendInfo: { CFBundleLocalizations: ['en', 'zh_CN'] },
-       identity: macOSSigning?.signingIdentity,
--      forceCodeSigning: true,
-+      forceCodeSigning: !unsigned,
-       hardenedRuntime: true,
-       extendInfo: { NSMicrophoneUsageDescription: 'DeepSeek Harness uses your microphone to transcribe speech into message drafts.' },
-       entitlements: fileURLToPath(new URL('./macos-entitlements.plist', import.meta.url)),
-       entitlementsInherit: fileURLToPath(new URL('./macos-entitlements.plist', import.meta.url)),
-       // ASAR-unpacked native runtime files are pre-signed; PAK resources are sealed by their enclosing bundle.
-       signIgnore: ['/Contents/Resources/app\\.asar\\.unpacked/dsh(?:/|$)', '/Contents/Resources/runtime/primary-runtime(?:/|$)', '\\.pak$'],
--      notarize: true,
-+      notarize: !unsigned,
-       target: ['dmg', 'zip'],
-     },
-     dmg: {
--      sign: true,
-+      sign: !unsigned,
-       writeUpdateInfo: false,
-     },
-     beforePack: async context => {
-@@ -196,6 +195,7 @@
-       if (packagesWindows && unsigned) await verifyWindowsAsarUnpack(buildPaths.dsh, resourcesDir, windowsCode)
-     },
-     afterSign: async context => {
-+      if (unsigned) return
-       if (windowsSigner !== undefined) {
-         await signWindowsCode(context.appOutDir, {
-           thumbprint: new X509Certificate(await readFile(env.DSH_DESKTOP_WINDOWS_CER_FILE)).fingerprint.replaceAll(':', ''),
-@@ -213,6 +213,7 @@
-       verifyMacOSSignatureAfterSign(context, macOSSigning ?? resolveMacOSSigningEnvironment(env))
-     },
-     artifactBuildCompleted: artifact => {
-+      if (unsigned) return
-       if (!artifact.file.endsWith('.dmg')) return
-       return notarizeMacOSDiskImageArtifact(
-         artifact,
---- a/apps/desktop/scripts/package-target.ts	2026-10-06 15:37:36
-+++ b/apps/desktop/scripts/package-target.ts	2026-10-06 15:37:36
-@@ -234,7 +234,7 @@
-   })
-   if (positionals.length > 1) throw new Error('desktop package: expected at most one target')
-   const name = positionals[0] ?? hostTargetName(hostPlatform, hostArch)
--  if (values.unsigned && name !== 'win-x64') throw new Error('desktop package: --unsigned requires win-x64')
-+  if (values.unsigned && name !== 'win-x64' && !name.startsWith('mac-')) throw new Error('desktop package: --unsigned requires win-x64')
-   if (values.unsigned && values['prepare-only']) throw new Error('desktop package: --unsigned cannot use --prepare-only')
-   const requestedBuildVersion = values['build-version']?.trim()
-   if (values['build-version'] !== undefined && (requestedBuildVersion === undefined || requestedBuildVersion === '')) {
-@@ -366,7 +366,8 @@
-       recordPackagingEvent(run.directory, { type: 'macos-settings', packConcurrency: settings.packConcurrency,
-         downloadProxyConfigured: settings.downloadProxy !== undefined,
-         notarizationProxyConfigured: settings.notarizationProxy !== undefined })
--      await packagingStep(run.directory, 'macos-package', () => withMacOSSigningKeychain(environment,
-+      if (invocation.unsigned) await packagingStep(run.directory, 'macos-package', () => packageTarget(invocation, environment, run), secrets)
-+      else await packagingStep(run.directory, 'macos-package', () => withMacOSSigningKeychain(environment,
-         signingEnvironment => packageTarget(invocation, signingEnvironment, run)), secrets)
-     } else {
-       await packagingStep(run.directory, 'windows-package', () => packageTarget(invocation, environment, run), secrets)
-@@ -470,7 +471,7 @@
-   await execute(['run', 'prepare:runtime', ...(signPrimaryRuntime ? ['--defer-primary-runtime-smoke'] : [])], downloadEnv)
-   if (signPrimaryRuntime) await execute(['run', 'sign:primary-runtime'], electronBuilderEnv)
-   await execute(['run', 'prepare:packages'], targetEnv)
--  await execute(['run', 'prepare:dsh', ...(signPrimaryRuntime ? ['--defer-runtime-smoke'] : [])], downloadEnv)
-+  await execute(['run', 'prepare:dsh', ...(signPrimaryRuntime ? ['--defer-runtime-smoke'] : []), ...(invocation.unsigned ? ['--unsigned'] : [])], downloadEnv)
-   if (signPrimaryRuntime) await execute(['run', 'sign:primary-runtime', '--dsh'], electronBuilderEnv)
-   if (invocation.prepareOnly) return
-   if (target.platform === 'darwin' && !invocation.directory) {
-@@ -488,10 +489,12 @@
-     }, artifact => execute(desktopElectronBuilderArguments(target, false, artifact), electronBuilderEnv)), undefined, undefined, proxyEvent)
-   } else if (target.platform === 'darwin') {
-     await execute([...desktopElectronBuilderArguments(target, true), '--config.mac.notarize=false'], electronBuilderEnv)
--    await execute(['exec', 'tsx', 'scripts/smoke-packaged-runtime.ts'], targetEnv)
--    const appPath = join(buildPaths.artifacts, target.arch === 'arm64' ? 'mac-arm64' : 'mac', 'DeepSeek Harness.app')
--    await withMacOSNotarizationProxy(mac?.notarizationProxy,
--      () => notarizeMacOS({ appPath, ...resolveMacOSNotarizationEnvironment(environment) }), undefined, undefined, proxyEvent)
-+    await execute(['exec', 'tsx', 'scripts/smoke-packaged-runtime.ts', ...(invocation.unsigned ? ['--unsigned'] : [])], targetEnv)
-+    if (!invocation.unsigned) {
-+      const appPath = join(buildPaths.artifacts, target.arch === 'arm64' ? 'mac-arm64' : 'mac', 'DeepSeek Harness.app')
-+      await withMacOSNotarizationProxy(mac?.notarizationProxy,
-+        () => notarizeMacOS({ appPath, ...resolveMacOSNotarizationEnvironment(environment) }), undefined, undefined, proxyEvent)
-+    }
-   } else {
-     await signedStage('artifacts', () => execute(desktopElectronBuilderArguments(target, invocation.directory), electronBuilderEnv))
-     await execute(['exec', 'tsx', 'scripts/smoke-packaged-runtime.ts', ...(invocation.unsigned ? ['--unsigned'] : [])], targetEnv)
---- a/apps/desktop/scripts/prepare-dsh.ts	2026-10-06 15:37:36
-+++ b/apps/desktop/scripts/prepare-dsh.ts	2026-10-06 15:37:36
-@@ -153,7 +153,7 @@
-     if (!existsSync(join(DSH_OUTPUT_ROOT, 'node_modules', '@deepseek-ai', `libreoffice-kit-${officeEngine}`, 'prebuilds.json'))) {
-       throw new Error(`desktop runtime: missing required LibreOffice engine ${officeEngine}`)
-     }
--    if (process.platform === 'darwin') {
-+    if (process.platform === 'darwin' && !process.argv.includes('--unsigned')) {
-       await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'sign:dsh-native', () => signMacOSRuntime(DSH_OUTPUT_ROOT, resolveDesktopAppId(process.env), resolveMacOSSigningEnvironment(process.env), target.arch, join(BUILD_PATHS.root, 'signature-cache')))
-       await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'sign:primary-native', () => signMacOSRuntime(join(RUNTIME_ROOT, 'primary-runtime'), resolveDesktopAppId(process.env), resolveMacOSSigningEnvironment(process.env), target.arch, join(BUILD_PATHS.root, 'signature-cache')))
-     }
---- a/apps/desktop/scripts/smoke-packaged-runtime.ts	2026-10-06 15:37:36
-+++ b/apps/desktop/scripts/smoke-packaged-runtime.ts	2026-10-06 15:37:36
-@@ -11,7 +11,7 @@
- const { values } = parseArgs({ options: { unsigned: { type: 'boolean', default: false } }, allowPositionals: false })
- const target = resolveDesktopBuildTarget()
- const windows = target === 'win-x64'
--if (values.unsigned && !windows) throw new Error('desktop smoke: unsigned artifacts require Windows')
-+if (values.unsigned && !windows && target !== 'mac-x64' && target !== 'mac-arm64') throw new Error('desktop smoke: unsigned artifacts require Windows')
- const artifacts = values.unsigned ? paths.unsignedArtifacts : paths.artifacts
- const application = windows ? join(artifacts, 'win-unpacked')
-   : join(artifacts, target === 'mac-arm64' ? 'mac-arm64' : 'mac', 'DeepSeek Harness.app', 'Contents')
---- a/apps/desktop/scripts/desktop-auto-update-environment.mjs	2026-10-06 15:37:36
-+++ b/apps/desktop/scripts/desktop-auto-update-environment.mjs	2026-10-06 15:37:36
-@@ -137,6 +137,27 @@
+diff --git a/apps/desktop/scripts/desktop-auto-update-environment.mjs b/apps/desktop/scripts/desktop-auto-update-environment.mjs
+index 464d079b4d..b669c353ce 100644
+--- a/apps/desktop/scripts/desktop-auto-update-environment.mjs
++++ b/apps/desktop/scripts/desktop-auto-update-environment.mjs
+@@ -137,6 +137,27 @@ export function resolveDesktopAutoUpdateConfig(env, platform, arch) {
      if (originEnvName === undefined) throw new Error('desktop auto-update: selected deployment has no origin')
      origin = httpsOrigin(requiredEnvironmentValue(env, originEnvName), originEnvName)
    }
@@ -161,9 +30,194 @@
    let releasePrefix = 'dsh-desk'
    if (environment === 'test') {
      const releaseId = requiredEnvironmentValue(env, 'DOWNLOAD_TEST_RELEASE_ID')
---- a/apps/desktop/src/update-coordinator.ts	2026-10-06 15:37:36
-+++ b/apps/desktop/src/update-coordinator.ts	2026-10-06 15:37:36
-@@ -6,6 +6,7 @@
+diff --git a/apps/desktop/scripts/electron-builder-config.mjs b/apps/desktop/scripts/electron-builder-config.mjs
+index 1fb787803c..9426354581 100644
+--- a/apps/desktop/scripts/electron-builder-config.mjs
++++ b/apps/desktop/scripts/electron-builder-config.mjs
+@@ -59,12 +59,10 @@ export function createElectronBuilderConfig(
+     throw new Error('desktop package: DSH_DESKTOP_UNSIGNED must be 0 or 1')
+   }
+   const unsigned = env.DSH_DESKTOP_UNSIGNED === '1'
+-  if (unsigned && resolvedPlatform !== 'win32') throw new Error('desktop package: unsigned builds require Windows')
+   const packagesMacOS = targetPlatform === 'darwin' || (targetPlatform === undefined && hostPlatform === 'darwin')
+   const packagesWindows = resolvedPlatform === 'win32'
+   if (resolvedPlatform === 'win32') installWindowsDirectoryInstaller()
+-  const macOSSigning = packagesMacOS ? resolveMacOSSigningEnvironment(env) : undefined
+-  if (packagesMacOS) resolveMacOSNotarizationEnvironment(env)
++  const macOSSigning = packagesMacOS && !unsigned ? resolveMacOSSigningEnvironment(env) : undefined
+   const buildPaths = desktopTargetBuildPaths(resolveDesktopBuildTarget(env, hostPlatform, hostArch))
+   let primaryRuntimeDestination
+   let dshDestination
+@@ -90,7 +88,8 @@ export function createElectronBuilderConfig(
+   if (windowsSigner !== undefined) {
+     installWindowsNsisBootstrapSigner({ sign: windowsSigner })
+   }
+-  const update = unsigned ? undefined : resolveDesktopAutoUpdateConfig(env, resolvedPlatform, resolvedArch)
++  // [dsh-local] 未签名构建也要写出 app-update.yml，否则内置更新器因 enabled() 判空而整体停用。
++  const update = resolveDesktopAutoUpdateConfig(env, resolvedPlatform, resolvedArch)
+   if (preparedRuntime !== undefined) buildPaths.dsh = preparedRuntime
+   // electron-builder merges extraMetadata into the packaged manifest, so a build version here reaches
+   // the artifact names, the update feed, and the installed app.getVersion() the updater compares against.
+@@ -153,18 +152,18 @@ export function createElectronBuilderConfig(
+       // macOS matches the application locale against this bundle, not Electron Framework resources.
+       extendInfo: { CFBundleLocalizations: ['en', 'zh_CN'] },
+       identity: macOSSigning?.signingIdentity,
+-      forceCodeSigning: true,
++      forceCodeSigning: !unsigned,
+       hardenedRuntime: true,
+       extendInfo: { NSMicrophoneUsageDescription: 'DeepSeek Harness uses your microphone to transcribe speech into message drafts.' },
+       entitlements: fileURLToPath(new URL('./macos-entitlements.plist', import.meta.url)),
+       entitlementsInherit: fileURLToPath(new URL('./macos-entitlements.plist', import.meta.url)),
+       // ASAR-unpacked native runtime files are pre-signed; PAK resources are sealed by their enclosing bundle.
+       signIgnore: ['/Contents/Resources/app\\.asar\\.unpacked/dsh(?:/|$)', '/Contents/Resources/runtime/primary-runtime(?:/|$)', '\\.pak$'],
+-      notarize: true,
++      notarize: !unsigned,
+       target: ['dmg', 'zip'],
+     },
+     dmg: {
+-      sign: true,
++      sign: !unsigned,
+       writeUpdateInfo: false,
+     },
+     beforePack: async context => {
+@@ -196,6 +195,7 @@ export function createElectronBuilderConfig(
+       if (packagesWindows && unsigned) await verifyWindowsAsarUnpack(buildPaths.dsh, resourcesDir, windowsCode)
+     },
+     afterSign: async context => {
++      if (unsigned) return
+       if (windowsSigner !== undefined) {
+         await signWindowsCode(context.appOutDir, {
+           thumbprint: new X509Certificate(await readFile(env.DSH_DESKTOP_WINDOWS_CER_FILE)).fingerprint.replaceAll(':', ''),
+@@ -213,6 +213,7 @@ export function createElectronBuilderConfig(
+       verifyMacOSSignatureAfterSign(context, macOSSigning ?? resolveMacOSSigningEnvironment(env))
+     },
+     artifactBuildCompleted: artifact => {
++      if (unsigned) return
+       if (!artifact.file.endsWith('.dmg')) return
+       return notarizeMacOSDiskImageArtifact(
+         artifact,
+diff --git a/apps/desktop/scripts/package-target.ts b/apps/desktop/scripts/package-target.ts
+index 62f4fcbbb2..e96c28af8e 100644
+--- a/apps/desktop/scripts/package-target.ts
++++ b/apps/desktop/scripts/package-target.ts
+@@ -234,7 +234,7 @@ export function parseDesktopPackageInvocation(
+   })
+   if (positionals.length > 1) throw new Error('desktop package: expected at most one target')
+   const name = positionals[0] ?? hostTargetName(hostPlatform, hostArch)
+-  if (values.unsigned && name !== 'win-x64') throw new Error('desktop package: --unsigned requires win-x64')
++  if (values.unsigned && name !== 'win-x64' && !name.startsWith('mac-')) throw new Error('desktop package: --unsigned requires win-x64')
+   if (values.unsigned && values['prepare-only']) throw new Error('desktop package: --unsigned cannot use --prepare-only')
+   const requestedBuildVersion = values['build-version']?.trim()
+   if (values['build-version'] !== undefined && (requestedBuildVersion === undefined || requestedBuildVersion === '')) {
+@@ -366,7 +366,8 @@ async function main(): Promise<void> {
+       recordPackagingEvent(run.directory, { type: 'macos-settings', packConcurrency: settings.packConcurrency,
+         downloadProxyConfigured: settings.downloadProxy !== undefined,
+         notarizationProxyConfigured: settings.notarizationProxy !== undefined })
+-      await packagingStep(run.directory, 'macos-package', () => withMacOSSigningKeychain(environment,
++      if (invocation.unsigned) await packagingStep(run.directory, 'macos-package', () => packageTarget(invocation, environment, run), secrets)
++      else await packagingStep(run.directory, 'macos-package', () => withMacOSSigningKeychain(environment,
+         signingEnvironment => packageTarget(invocation, signingEnvironment, run)), secrets)
+     } else {
+       await packagingStep(run.directory, 'windows-package', () => packageTarget(invocation, environment, run), secrets)
+@@ -470,7 +471,7 @@ export async function packageTarget(
+   await execute(['run', 'prepare:runtime', ...(signPrimaryRuntime ? ['--defer-primary-runtime-smoke'] : [])], downloadEnv)
+   if (signPrimaryRuntime) await execute(['run', 'sign:primary-runtime'], electronBuilderEnv)
+   await execute(['run', 'prepare:packages'], targetEnv)
+-  await execute(['run', 'prepare:dsh', ...(signPrimaryRuntime ? ['--defer-runtime-smoke'] : [])], downloadEnv)
++  await execute(['run', 'prepare:dsh', ...(signPrimaryRuntime ? ['--defer-runtime-smoke'] : []), ...(invocation.unsigned ? ['--unsigned'] : [])], downloadEnv)
+   if (signPrimaryRuntime) await execute(['run', 'sign:primary-runtime', '--dsh'], electronBuilderEnv)
+   if (invocation.prepareOnly) return
+   if (target.platform === 'darwin' && !invocation.directory) {
+@@ -488,10 +489,12 @@ export async function packageTarget(
+     }, artifact => execute(desktopElectronBuilderArguments(target, false, artifact), electronBuilderEnv)), undefined, undefined, proxyEvent)
+   } else if (target.platform === 'darwin') {
+     await execute([...desktopElectronBuilderArguments(target, true), '--config.mac.notarize=false'], electronBuilderEnv)
+-    await execute(['exec', 'tsx', 'scripts/smoke-packaged-runtime.ts'], targetEnv)
+-    const appPath = join(buildPaths.artifacts, target.arch === 'arm64' ? 'mac-arm64' : 'mac', 'DeepSeek Harness.app')
+-    await withMacOSNotarizationProxy(mac?.notarizationProxy,
+-      () => notarizeMacOS({ appPath, ...resolveMacOSNotarizationEnvironment(environment) }), undefined, undefined, proxyEvent)
++    await execute(['exec', 'tsx', 'scripts/smoke-packaged-runtime.ts', ...(invocation.unsigned ? ['--unsigned'] : [])], targetEnv)
++    if (!invocation.unsigned) {
++      const appPath = join(buildPaths.artifacts, target.arch === 'arm64' ? 'mac-arm64' : 'mac', 'DeepSeek Harness.app')
++      await withMacOSNotarizationProxy(mac?.notarizationProxy,
++        () => notarizeMacOS({ appPath, ...resolveMacOSNotarizationEnvironment(environment) }), undefined, undefined, proxyEvent)
++    }
+   } else {
+     await signedStage('artifacts', () => execute(desktopElectronBuilderArguments(target, invocation.directory), electronBuilderEnv))
+     await execute(['exec', 'tsx', 'scripts/smoke-packaged-runtime.ts', ...(invocation.unsigned ? ['--unsigned'] : [])], targetEnv)
+diff --git a/apps/desktop/scripts/prepare-dsh.ts b/apps/desktop/scripts/prepare-dsh.ts
+index 442e01757e..0b7d68721a 100644
+--- a/apps/desktop/scripts/prepare-dsh.ts
++++ b/apps/desktop/scripts/prepare-dsh.ts
+@@ -153,7 +153,7 @@ async function main(): Promise<void> {
+     if (!existsSync(join(DSH_OUTPUT_ROOT, 'node_modules', '@deepseek-ai', `libreoffice-kit-${officeEngine}`, 'prebuilds.json'))) {
+       throw new Error(`desktop runtime: missing required LibreOffice engine ${officeEngine}`)
+     }
+-    if (process.platform === 'darwin') {
++    if (process.platform === 'darwin' && !process.argv.includes('--unsigned')) {
+       await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'sign:dsh-native', () => signMacOSRuntime(DSH_OUTPUT_ROOT, resolveDesktopAppId(process.env), resolveMacOSSigningEnvironment(process.env), target.arch, join(BUILD_PATHS.root, 'signature-cache')))
+       await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'sign:primary-native', () => signMacOSRuntime(join(RUNTIME_ROOT, 'primary-runtime'), resolveDesktopAppId(process.env), resolveMacOSSigningEnvironment(process.env), target.arch, join(BUILD_PATHS.root, 'signature-cache')))
+     }
+diff --git a/apps/desktop/scripts/prepare-package-set.ts b/apps/desktop/scripts/prepare-package-set.ts
+index 7e7d62eea2..a1c929a250 100644
+--- a/apps/desktop/scripts/prepare-package-set.ts
++++ b/apps/desktop/scripts/prepare-package-set.ts
+@@ -12,7 +12,7 @@ import {
+   statSync,
+   writeFileSync,
+ } from 'node:fs'
+-import { basename, join, resolve } from 'node:path'
++import { basename, dirname, join, resolve } from 'node:path'
+ import { parseArgs } from 'node:util'
+ import * as yaml from 'js-yaml'
+ import {
+@@ -88,7 +88,10 @@ export function selectDesktopPackageClosure(
+ }
+ 
+ function packedManifest(tarball: string): Record<string, unknown> {
+-  const value: unknown = JSON.parse(capture('tar', ['-xOzf', tarball, 'package/package.json']))
++  // GNU tar reads the colon in an absolute Windows path as a remote-host separator, so it fails
++  // with exit status 2 on `D:\...`. Run beside the archive and name it relatively, the same
++  // shape desktop-toolchain-preflight.ts uses for its own tar probe.
++  const value: unknown = JSON.parse(capture('tar', ['-xOzf', basename(tarball), 'package/package.json'], { cwd: dirname(tarball) }))
+   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+     throw new Error(`desktop package set: ${tarball} has no package manifest`)
+   }
+diff --git a/apps/desktop/scripts/smoke-packaged-runtime.ts b/apps/desktop/scripts/smoke-packaged-runtime.ts
+index 106830b5ad..4b0562c462 100644
+--- a/apps/desktop/scripts/smoke-packaged-runtime.ts
++++ b/apps/desktop/scripts/smoke-packaged-runtime.ts
+@@ -11,7 +11,7 @@ const paths = resolveDesktopTargetBuildPaths()
+ const { values } = parseArgs({ options: { unsigned: { type: 'boolean', default: false } }, allowPositionals: false })
+ const target = resolveDesktopBuildTarget()
+ const windows = target === 'win-x64'
+-if (values.unsigned && !windows) throw new Error('desktop smoke: unsigned artifacts require Windows')
++if (values.unsigned && !windows && target !== 'mac-x64' && target !== 'mac-arm64') throw new Error('desktop smoke: unsigned artifacts require Windows')
+ const artifacts = values.unsigned ? paths.unsignedArtifacts : paths.artifacts
+ const application = windows ? join(artifacts, 'win-unpacked')
+   : join(artifacts, target === 'mac-arm64' ? 'mac-arm64' : 'mac', 'DeepSeek Harness.app', 'Contents')
+diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
+index b4b8153b7f..1e1e8ce2ea 100644
+--- a/apps/desktop/src/main.ts
++++ b/apps/desktop/src/main.ts
+@@ -1335,6 +1335,12 @@ async function main(): Promise<void> {
+ 
+ const ownsDesktopInstance = claimDesktopSingleInstance(app, () => { focusPrimaryWindow() })
+ 
++// [dsh-local] 更新器走 Electron session（Chromium 网络栈）。经本地代理下载 393MB 产物时，
++// QUIC/HTTP2 会在接近结束时以 net::ERR_HTTP2_PROTOCOL_ERROR 中断，而 curl 走同一地址正常。
++// 退回 HTTP/1.1 后下载稳定；代价是网页视图加载略慢，不影响功能。
++app.commandLine.appendSwitch('disable-http2')
++app.commandLine.appendSwitch('disable-quic')
++
+ if (ownsDesktopInstance) void app.whenReady().then(main).catch(async (error: unknown) => {
+   const message = error instanceof Error ? error.message : String(error)
+   console.error(error)
+diff --git a/apps/desktop/src/update-coordinator.ts b/apps/desktop/src/update-coordinator.ts
+index 8d6eb808e7..5432f9ca13 100644
+--- a/apps/desktop/src/update-coordinator.ts
++++ b/apps/desktop/src/update-coordinator.ts
+@@ -6,6 +6,7 @@ import { app } from 'electron'
  import electronUpdater, { type AppUpdater, type ProgressInfo, type UpdateInfo } from 'electron-updater'
  import { gt, valid } from 'semver'
  import type { DesktopUpdateState } from './ipc.ts'
@@ -171,7 +225,7 @@
  import { DesktopUpdateHttpExecutor } from './update-http-executor.ts'
  import { DesktopUpdatePreparationError } from './update-error.ts'
  
-@@ -134,7 +135,9 @@
+@@ -134,7 +135,9 @@ export class DesktopUpdateCoordinator {
        try {
          if (!await this.beforeRestart()) return this.setState({ phase: 'ready', version })
          this.assertLive()
@@ -182,24 +236,12 @@
          return this.current
        } catch (error) {
          if (this.current.phase === 'error' && this.current.failedOperation === 'install') return this.current
---- a/apps/desktop/src/main.ts	2026-10-06 15:37:36
-+++ b/apps/desktop/src/main.ts	2026-10-06 15:37:36
-@@ -1334,6 +1334,12 @@
- }
- 
- const ownsDesktopInstance = claimDesktopSingleInstance(app, () => { focusPrimaryWindow() })
-+
-+// [dsh-local] 更新器走 Electron session（Chromium 网络栈）。经本地代理下载 393MB 产物时，
-+// QUIC/HTTP2 会在接近结束时以 net::ERR_HTTP2_PROTOCOL_ERROR 中断，而 curl 走同一地址正常。
-+// 退回 HTTP/1.1 后下载稳定；代价是网页视图加载略慢，不影响功能。
-+app.commandLine.appendSwitch('disable-http2')
-+app.commandLine.appendSwitch('disable-quic')
- 
- if (ownsDesktopInstance) void app.whenReady().then(main).catch(async (error: unknown) => {
-   const message = error instanceof Error ? error.message : String(error)
---- a/apps/desktop/src/update-replace.ts	2026-10-06 15:37:36
-+++ b/apps/desktop/src/update-replace.ts	2026-10-06 15:37:36
-@@ -0,0 +1,97 @@
+diff --git a/apps/desktop/src/update-replace.ts b/apps/desktop/src/update-replace.ts
+new file mode 100644
+index 0000000000..cdf7b6161e
+--- /dev/null
++++ b/apps/desktop/src/update-replace.ts
+@@ -0,0 +1,99 @@
 +/**
 + * [dsh-local] Replace the installed bundle ourselves instead of letting Squirrel.Mac do it.
 + *
@@ -285,11 +327,13 @@
 +    'echo "staged app: $NEW"',
 +    'if [ -z "$NEW" ]; then echo "no .app found inside the archive"; exit 1; fi',
 +    `ditto "$NEW" "${bundle}"`,
-+    'rm -rf "$WORK"',
 +    `du -sh "${bundle}"`,
++    // Reopening is the point of this script, so it runs before cleanup: under `set -e` a failed
++    // removal would otherwise abort here and leave the app closed with no error shown anywhere.
 +    `open "${bundle}"`,
 +    'echo "open issued"',
-+    'rm -f "$0"',
++    'rm -rf "$WORK" || echo "warning: could not remove $WORK"',
++    'rm -f "$0" || echo "warning: could not remove $0"',
 +    '',
 +  ]
 +  writeFileSync(script, lines.join('\n'), { mode: 0o700 })
