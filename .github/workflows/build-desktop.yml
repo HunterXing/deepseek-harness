@@ -107,6 +107,9 @@ jobs:
         run: |
           # 与 macOS 同理：模板在 apps/desktop/ 下，不在仓库根。
           # 签名字段保持为空 —— win-x64 --unsigned 是上游自带的免凭据路径。
+          # 不要往这里加 DSH_DESKTOP_UPDATE_FEED_URL：desktop-package-environment.mjs
+          # 的 SHARED_SETTING/WINDOWS_SETTING 白名单不接受它，会直接抛错中止构建。
+          # feed 地址由免签名补丁里的默认值按 target 推导，不需要注入。
           cp apps/desktop/.env.windows.example apps/desktop/.env.windows
           cat >> apps/desktop/.env.windows <<'ENVEOF'
           DSH_DESKTOP_APP_ID=com.deepseek.harness.local
@@ -117,16 +120,18 @@ jobs:
           DSH_DESKTOP_MANDATORY_UPDATE_PROD_ORIGIN=https://download.deepseek.com
           DSH_DESKTOP_MANDATORY_UPDATE_CONFIG='{"allowedAuthOrigins":["https://login.example.com"]}'
           DSH_DESKTOP_WINDOWS_SIGNATURE_CACHE_CONCURRENCY=4
-          DSH_DESKTOP_UPDATE_FEED_URL=https://github.com/HunterXing/deepseek-harness/releases/download/ci-${{ matrix.target }}/
           ENVEOF
           echo "写入的配置："
           grep -vE '^\s*#|^\s*$' apps/desktop/.env.windows | tail -9
 
       - name: 免签名补丁（构建期应用，产物生成后工作树不保留）
-        if: matrix.platform == 'macOS'
         shell: bash
         run: |
-          # 上游一旦改动这 4 个脚本，这里会响亮失败——这是刻意设计：
+          # 三个平台都要打：补丁里的 desktop-auto-update-environment.mjs 提供了按 target
+          # 推导的 feed 默认值，Windows 同样依赖它，且该文件是 SHARED_SETTING 白名单
+          # 不允许通过 .env 注入的。仓库 .gitattributes 强制 eol=lf，Windows 上
+          # checkout 出来的就是 LF，git apply 不会因 CRLF 失败。
+          # 上游一旦改动这 8 个文件，这里会响亮失败——这是刻意设计：
           # 宁可构建中止，也不要产出一个悄悄跑偏的包。修复办法见 .ci/README.md
           git apply --check -p1 .ci/unsigned-macos.patch
           git apply -p1 .ci/unsigned-macos.patch
@@ -140,6 +145,20 @@ jobs:
           done
           echo "语法检查完成"
 
+      # 上游要求 build version 形如 <productVersion>.<date>.<sequence>。
+      # 不传 --build-version 时 extraMetadata.version 不会被注入，产物的
+      # app.getVersion() 会停在 productVersion，发布出去的更新永远「不是最新」。
+      # GITHUB_RUN_NUMBER 单调递增，保证新构建的版本恒大于已安装的版本。
+      - name: 计算构建版本
+        id: bver
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=$(node -p "require('./apps/desktop/package.json').version")
+          VER="${BASE}.$(date -u +%Y%m%d).${GITHUB_RUN_NUMBER}"
+          echo "构建版本: $VER"
+          echo "value=$VER" >> "$GITHUB_OUTPUT"
+
       - name: 构建 ${{ matrix.target }}
         shell: bash
         env:
@@ -148,12 +167,15 @@ jobs:
         run: |
           set -euo pipefail
           case "${{ matrix.target }}" in
-            mac-x64)   pnpm run package:desktop:mac:x64   -- --unsigned --dir ;;
-            mac-arm64) pnpm run package:desktop:mac:arm64 -- --unsigned --dir ;;
+            mac-x64)   pnpm run package:desktop:mac:x64   -- --unsigned --dir --build-version "${{ steps.bver.outputs.value }}" ;;
+            mac-arm64) pnpm run package:desktop:mac:arm64 -- --unsigned --dir --build-version "${{ steps.bver.outputs.value }}" ;;
             # 上游自带免凭据脚本：package:win:x64:unsigned == package-target.ts win-x64 --unsigned
-            win-x64)   pnpm run package:desktop:win:x64:unsigned ;;
+            win-x64)   pnpm run package:desktop:win:x64:unsigned -- --build-version "${{ steps.bver.outputs.value }}" ;;
             *) echo "未知目标"; exit 1 ;;
           esac
+          echo "--- 构建自述里的版本（唯一可信来源）---"
+          find apps/desktop/.desktop-build/packaging-runs -name '*.json' -newermt '-30 minutes' \
+            -exec grep -o '"version":"[^"]*"' {} \; | sort -u
 
       - name: 收集产物（macOS）
         if: matrix.platform == 'macOS'
@@ -168,7 +190,18 @@ jobs:
           echo "找到产物：$APP ($(du -sh "$APP" | cut -f1))"
           /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist" | sed 's/^/  版本: /'
           lipo -archs "$APP/Contents/MacOS/DeepSeek Harness" | sed 's/^/  架构: /'
-          OUT="out/dsh-${{ matrix.target }}-$(date +%Y%m%d).zip"
+          VER=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")
+          # 发布前自检：Info.plist 的版本必须等于我们请求的 --build-version。
+          # 不一致说明 extraMetadata 没生效，产物会带着 productVersion 出去，
+          # 结果是所有客户端永远提示有新版。
+          if [ "$VER" != "${{ steps.bver.outputs.value }}" ]; then
+            echo "::error::Info.plist 版本 [$VER] 与请求的 --build-version [${{ steps.bver.outputs.value }}] 不一致，拒绝发布"
+            exit 1
+          fi
+          echo "版本自检通过：$VER"
+          # 文件名带版本号：electron-updater 靠把 URL 里的新版本号替换成旧版本号
+          # 来定位上一版的 blockmap，名字里没有版本号差分就退化成全量下载。
+          OUT="out/dsh-${{ matrix.target }}-${VER}.zip"
           mkdir -p out
           # 必须用 ditto 打包：actions/upload-artifact 解包后会丢失可执行位和符号链接，
           # 直接上传 .app 目录会得到一个打不开的 app。
@@ -176,7 +209,6 @@ jobs:
 
           # 生成 electron-updater 读取的清单。Squirrel.Mac 会按 sha512 校验下载到的 zip，
           # 字段名/层级必须与 electron-builder 产出的一致。
-          VER=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")
           NAME=$(basename "$OUT")
           FEED="https://github.com/HunterXing/deepseek-harness/releases/download/ci-${{ matrix.target }}/"
           SHA=$(openssl dgst -sha512 -binary "$OUT" | openssl base64 -A)
@@ -209,9 +241,20 @@ jobs:
             echo "::error::未找到 .exe 产物"; find apps/desktop/.desktop-build/targets -maxdepth 3 | head -40; exit 1
           fi
           echo "找到产物：$EXE ($(du -sh "$EXE" | cut -f1))"
-          NAME="dsh-${{ matrix.target }}-$(date +%Y%m%d)-$(basename "$EXE")"
+          # 版本取自构建自述，不取仓库 package.json —— 后者只是 productVersion，
+          # 少了构建后缀，发布出去的清单会让所有已装客户端永远看到「有新版」。
+          VER="${{ steps.bver.outputs.value }}"
+          RECORDED=$(find apps/desktop/.desktop-build/packaging-runs -name '*.json' -newermt '-60 minutes' \
+            -exec grep -o '"version":"[^"]*"' {} \; | head -1 | cut -d'"' -f4)
+          if [ "$RECORDED" != "$VER" ]; then
+            echo "::error::构建自述版本 [$RECORDED] 与传入的 --build-version [$VER] 不一致，拒绝发布"
+            exit 1
+          fi
+          echo "版本自检通过：$VER"
+          # 文件名带版本号是差分更新的前提：electron-updater 靠把 URL 里的新版本号
+          # 替换成旧版本号来定位上一版的 blockmap。
+          NAME="dsh-${{ matrix.target }}-${VER}.exe"
           cp "$EXE" "out/$NAME"
-          VER=$(node -p "require('$GITHUB_WORKSPACE/package.json').version")
           FEED="https://github.com/HunterXing/deepseek-harness/releases/download/ci-${{ matrix.target }}/"
           SHA=$(openssl dgst -sha512 -binary "out/$NAME" | openssl base64 -A)
           SIZE=$(stat -c '%s' "out/$NAME" 2>/dev/null || wc -c < "out/$NAME")
@@ -272,9 +315,21 @@ jobs:
           name: dsh-${{ matrix.target }}
           path: dist
 
-      - name: 读取仓库版本号
+      - name: 读取构建版本
         id: ver
-        run: echo "version=$(node -p "require('$GITHUB_WORKSPACE/package.json').version")" >> "$GITHUB_OUTPUT"
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 从清单读，而不是仓库 package.json —— 后者是 productVersion，
+          # 少了构建后缀，Release 标题会长期显示一个比产物旧的版本。
+          YML=$(ls dist/latest-mac.yml dist/latest.yml 2>/dev/null | head -1)
+          if [ -z "$YML" ]; then
+            echo "::error::产物里没有 electron-updater 清单"; ls -la dist/; exit 1
+          fi
+          VER=$(grep -m1 '^version:' "$YML" | awk '{print $2}')
+          echo "清单: $YML"
+          echo "构建版本: $VER"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
 
       - name: 待发布文件
         run: ls -la dist/
