@@ -1,5 +1,5 @@
---- a/apps/desktop/scripts/electron-builder-config.mjs	2026-10-06 10:51:33
-+++ b/apps/desktop/scripts/electron-builder-config.mjs	2026-10-06 10:51:33
+--- a/apps/desktop/scripts/electron-builder-config.mjs	2026-10-06 15:37:36
++++ b/apps/desktop/scripts/electron-builder-config.mjs	2026-10-06 15:37:36
 @@ -59,12 +59,10 @@
      throw new Error('desktop package: DSH_DESKTOP_UNSIGNED must be 0 or 1')
    }
@@ -62,8 +62,8 @@
        if (!artifact.file.endsWith('.dmg')) return
        return notarizeMacOSDiskImageArtifact(
          artifact,
---- a/apps/desktop/scripts/package-target.ts	2026-10-06 10:51:33
-+++ b/apps/desktop/scripts/package-target.ts	2026-10-06 10:51:33
+--- a/apps/desktop/scripts/package-target.ts	2026-10-06 15:37:36
++++ b/apps/desktop/scripts/package-target.ts	2026-10-06 15:37:36
 @@ -234,7 +234,7 @@
    })
    if (positionals.length > 1) throw new Error('desktop package: expected at most one target')
@@ -109,8 +109,8 @@
    } else {
      await signedStage('artifacts', () => execute(desktopElectronBuilderArguments(target, invocation.directory), electronBuilderEnv))
      await execute(['exec', 'tsx', 'scripts/smoke-packaged-runtime.ts', ...(invocation.unsigned ? ['--unsigned'] : [])], targetEnv)
---- a/apps/desktop/scripts/prepare-dsh.ts	2026-10-06 10:51:33
-+++ b/apps/desktop/scripts/prepare-dsh.ts	2026-10-06 10:51:33
+--- a/apps/desktop/scripts/prepare-dsh.ts	2026-10-06 15:37:36
++++ b/apps/desktop/scripts/prepare-dsh.ts	2026-10-06 15:37:36
 @@ -153,7 +153,7 @@
      if (!existsSync(join(DSH_OUTPUT_ROOT, 'node_modules', '@deepseek-ai', `libreoffice-kit-${officeEngine}`, 'prebuilds.json'))) {
        throw new Error(`desktop runtime: missing required LibreOffice engine ${officeEngine}`)
@@ -120,8 +120,8 @@
        await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'sign:dsh-native', () => signMacOSRuntime(DSH_OUTPUT_ROOT, resolveDesktopAppId(process.env), resolveMacOSSigningEnvironment(process.env), target.arch, join(BUILD_PATHS.root, 'signature-cache')))
        await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'sign:primary-native', () => signMacOSRuntime(join(RUNTIME_ROOT, 'primary-runtime'), resolveDesktopAppId(process.env), resolveMacOSSigningEnvironment(process.env), target.arch, join(BUILD_PATHS.root, 'signature-cache')))
      }
---- a/apps/desktop/scripts/smoke-packaged-runtime.ts	2026-10-06 10:51:33
-+++ b/apps/desktop/scripts/smoke-packaged-runtime.ts	2026-10-06 10:51:33
+--- a/apps/desktop/scripts/smoke-packaged-runtime.ts	2026-10-06 15:37:36
++++ b/apps/desktop/scripts/smoke-packaged-runtime.ts	2026-10-06 15:37:36
 @@ -11,7 +11,7 @@
  const { values } = parseArgs({ options: { unsigned: { type: 'boolean', default: false } }, allowPositionals: false })
  const target = resolveDesktopBuildTarget()
@@ -131,8 +131,8 @@
  const artifacts = values.unsigned ? paths.unsignedArtifacts : paths.artifacts
  const application = windows ? join(artifacts, 'win-unpacked')
    : join(artifacts, target === 'mac-arm64' ? 'mac-arm64' : 'mac', 'DeepSeek Harness.app', 'Contents')
---- a/apps/desktop/scripts/desktop-auto-update-environment.mjs	2026-10-06 10:51:33
-+++ b/apps/desktop/scripts/desktop-auto-update-environment.mjs	2026-10-06 10:51:33
+--- a/apps/desktop/scripts/desktop-auto-update-environment.mjs	2026-10-06 15:37:36
++++ b/apps/desktop/scripts/desktop-auto-update-environment.mjs	2026-10-06 15:37:36
 @@ -137,6 +137,27 @@
      if (originEnvName === undefined) throw new Error('desktop auto-update: selected deployment has no origin')
      origin = httpsOrigin(requiredEnvironmentValue(env, originEnvName), originEnvName)
@@ -161,8 +161,8 @@
    let releasePrefix = 'dsh-desk'
    if (environment === 'test') {
      const releaseId = requiredEnvironmentValue(env, 'DOWNLOAD_TEST_RELEASE_ID')
---- a/apps/desktop/src/update-coordinator.ts	2026-10-06 12:58:53
-+++ b/apps/desktop/src/update-coordinator.ts	2026-10-06 12:58:53
+--- a/apps/desktop/src/update-coordinator.ts	2026-10-06 15:37:36
++++ b/apps/desktop/src/update-coordinator.ts	2026-10-06 15:37:36
 @@ -6,6 +6,7 @@
  import electronUpdater, { type AppUpdater, type ProgressInfo, type UpdateInfo } from 'electron-updater'
  import { gt, valid } from 'semver'
@@ -182,9 +182,24 @@
          return this.current
        } catch (error) {
          if (this.current.phase === 'error' && this.current.failedOperation === 'install') return this.current
---- a/apps/desktop/src/update-replace.ts	2026-10-06 12:58:53
-+++ b/apps/desktop/src/update-replace.ts	2026-10-06 12:58:53
-@@ -0,0 +1,82 @@
+--- a/apps/desktop/src/main.ts	2026-10-06 15:37:36
++++ b/apps/desktop/src/main.ts	2026-10-06 15:37:36
+@@ -1334,6 +1334,12 @@
+ }
+ 
+ const ownsDesktopInstance = claimDesktopSingleInstance(app, () => { focusPrimaryWindow() })
++
++// [dsh-local] 更新器走 Electron session（Chromium 网络栈）。经本地代理下载 393MB 产物时，
++// QUIC/HTTP2 会在接近结束时以 net::ERR_HTTP2_PROTOCOL_ERROR 中断，而 curl 走同一地址正常。
++// 退回 HTTP/1.1 后下载稳定；代价是网页视图加载略慢，不影响功能。
++app.commandLine.appendSwitch('disable-http2')
++app.commandLine.appendSwitch('disable-quic')
+ 
+ if (ownsDesktopInstance) void app.whenReady().then(main).catch(async (error: unknown) => {
+   const message = error instanceof Error ? error.message : String(error)
+--- a/apps/desktop/src/update-replace.ts	2026-10-06 15:37:36
++++ b/apps/desktop/src/update-replace.ts	2026-10-06 15:37:36
+@@ -0,0 +1,97 @@
 +/**
 + * [dsh-local] Replace the installed bundle ourselves instead of letting Squirrel.Mac do it.
 + *
@@ -200,9 +215,12 @@
 +import { homedir } from 'node:os'
 +import { dirname, join } from 'node:path'
 +
-+/** Electron's `process.resourcesPath` is `<bundle>/Contents/Resources`. */
++/**
++ * `process.resourcesPath` is `<bundle>/Contents/Resources`, so the bundle is two levels up.
++ * Three levels up is `<parent folder>` — that mistake wrote the app into `/Applications` directly.
++ */
 +function bundlePath(): string {
-+  return dirname(dirname(dirname(process.resourcesPath)))
++  return dirname(dirname(process.resourcesPath))
 +}
 +
 +/** `updaterCacheDirName` comes from the app-update.yml electron-updater wrote at packaging time. */
@@ -231,34 +249,46 @@
 + * The helper waits for this PID to disappear before touching the bundle, extracts the verified
 + * archive, writes it over the installed copy, and reopens it. `ditto` merges into the existing
 + * bundle rather than removing it first, so an interrupted run leaves a still-launchable app
-+ * instead of a half-deleted one.
++ * instead of a half-deleted one. Everything the script does is appended to a log, because a
++ * silent failure here is indistinguishable from "the app just never reopened".
 + */
 +export function quitInstallByReplacingBundle(currentPid: number): void {
 +  const bundle = bundlePath()
++  if (!bundle.endsWith('.app')) {
++    throw new Error(`desktop update: refusing to replace ${bundle}, which is not an app bundle`)
++  }
 +  const cacheName = updaterCacheDir()
 +  if (cacheName === undefined) throw new Error('desktop update: app-update.yml has no updaterCacheDirName')
 +  const archive = downloadedArchive(cacheName)
 +  if (archive === undefined) throw new Error('desktop update: no verified archive in the updater cache')
 +
-+  const script = join(homedir(), 'Library', 'Caches', cacheName, `replace-${currentPid}.sh`)
++  const cacheRoot = join(homedir(), 'Library', 'Caches', cacheName)
++  const script = join(cacheRoot, `replace-${currentPid}.sh`)
++  const log = join(cacheRoot, `replace-${currentPid}.log`)
 +  mkdirSync(dirname(script), { recursive: true })
 +  const lines = [
 +    '#!/bin/sh',
 +    'set -e',
-+    '# Wait for the running app to exit (up to 120s), then swap and reopen.',
++    `exec >>"${log}" 2>&1`,
++    `echo "[$(date -u +%FT%TZ)] start; pid=${currentPid} bundle=${bundle}"`,
 +    'i=0',
 +    `while kill -0 ${currentPid} 2>/dev/null; do`,
-+    '  i=$((i+1)); [ "$i" -gt 1200 ] && exit 1',
++    '  i=$((i+1))',
++    '  if [ "$i" -gt 1200 ]; then echo "timed out waiting for the app to exit"; exit 1; fi',
 +    '  sleep 0.1',
 +    'done',
 +    'sleep 1',
 +    'WORK=$(mktemp -d)',
++    'echo "extracting to $WORK"',
 +    `ditto -x -k "${archive}" "$WORK"`,
-+    `NEW=$(find "$WORK" -maxdepth 1 -name '*.app' -type d | head -1)`,
-+    '[ -n "$NEW" ] || exit 1',
++    'NEW=$(find "$WORK" -maxdepth 1 -name "*.app" -type d | head -1)',
++    'echo "staged app: $NEW"',
++    'if [ -z "$NEW" ]; then echo "no .app found inside the archive"; exit 1; fi',
 +    `ditto "$NEW" "${bundle}"`,
 +    'rm -rf "$WORK"',
++    `du -sh "${bundle}"`,
 +    `open "${bundle}"`,
++    'echo "open issued"',
 +    'rm -f "$0"',
 +    '',
 +  ]
@@ -267,18 +297,3 @@
 +  const child = spawn('/bin/sh', [script], { detached: true, stdio: 'ignore' })
 +  child.unref()
 +}
---- a/apps/desktop/src/main.ts	2026-10-06 13:27:55
-+++ b/apps/desktop/src/main.ts	2026-10-06 13:27:55
-@@ -1334,6 +1334,12 @@
- }
- 
- const ownsDesktopInstance = claimDesktopSingleInstance(app, () => { focusPrimaryWindow() })
-+
-+// [dsh-local] 更新器走 Electron session（Chromium 网络栈）。经本地代理下载 393MB 产物时，
-+// QUIC/HTTP2 会在接近结束时以 net::ERR_HTTP2_PROTOCOL_ERROR 中断，而 curl 走同一地址正常。
-+// 退回 HTTP/1.1 后下载稳定；代价是网页视图加载略慢，不影响功能。
-+app.commandLine.appendSwitch('disable-http2')
-+app.commandLine.appendSwitch('disable-quic')
- 
- if (ownsDesktopInstance) void app.whenReady().then(main).catch(async (error: unknown) => {
-   const message = error instanceof Error ? error.message : String(error)
