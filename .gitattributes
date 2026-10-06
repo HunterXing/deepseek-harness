@@ -8,6 +8,12 @@
 
 *.pdf binary
 
+# A unified diff writes a context line for an empty source line as a single
+# space, so every hunk boundary in a patch file looks like trailing whitespace
+# to `git diff --check`. Exempt them; the whitespace gate keeps its full force
+# on every real source file.
+.ci/*.patch -whitespace
+
 # The persistence catalog is the readable projection of these generated schemas.
 docs/persistence-schema.json linguist-generated=true
 docs/persistence-changes/*.schema.json linguist-generated=true
