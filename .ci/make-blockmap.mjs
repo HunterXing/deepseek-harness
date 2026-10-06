@@ -9,14 +9,20 @@
  * 不重新实现分块算法。
  *
  * 用法：
- *   node .ci/make-blockmap.mjs <artifact>          生成并校验
+ *   node .ci/make-blockmap.mjs <artifact>          生成旁挂的 .blockmap（macOS zip）
  *   node .ci/make-blockmap.mjs --verify <artifact>  只校验已有的 <artifact>.blockmap
+ *   node .ci/make-blockmap.mjs --embed <artifact>   把 blockmap 内嵌进产物末尾（Windows NSIS）
+ *
+ * `--embed` 会**修改文件**：NSIS 的差分下载器
+ * `FileWithEmbeddedBlockMapDifferentialDownloader` 从产物末尾读
+ * `blockMapSize + 4` 字节（末 4 字节是 BE 长度头），所以必须先内嵌、
+ * 再算 sha512 与 size，顺序反了清单里的校验和就对不上。
  */
 
 import { createRequire } from 'node:module'
 import { closeSync, openSync, readFileSync, readSync, statSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { gunzipSync } from 'node:zlib'
+import { gunzipSync, inflateRawSync } from 'node:zlib'
 import process from 'node:process'
 
 // app-builder-lib 只存在于 apps/desktop 的依赖树里（pnpm 严格布局，根目录解析不到）。
@@ -78,14 +84,71 @@ function verify(artifact, blockmapFile) {
   }
 }
 
-const verifyOnly = process.argv[2] === '--verify'
-const target = process.argv[verifyOnly ? 3 : 2]
-if (target === undefined) {
-  throw new Error('usage: make-blockmap.mjs [--verify] <artifact>')
+/**
+ * 校验一个内嵌在产物末尾的 blockmap：读末 blockMapSize+4 字节，
+ * 末 4 字节是压缩长度的 BE 头，前面是 deflateRaw 压缩的 JSON。
+ * @param {string} artifact 被内嵌的产物路径。
+ * @param {number} blockMapSize 压缩块的长度。
+ * @returns {{ chunks: number, covered: number, bytes: number }} 统计信息。
+ */
+function verifyEmbedded(artifact, blockMapSize) {
+  if (!Number.isSafeInteger(blockMapSize) || blockMapSize < 1) {
+    throw new Error(`内嵌 blockMapSize 非法：${blockMapSize}`)
+  }
+  const bytes = statSync(artifact).size
+  const tail = Buffer.allocUnsafe(blockMapSize + 4)
+  const handle = openSync(artifact, 'r')
+  try {
+    readSync(handle, tail, 0, tail.length, bytes - tail.length)
+  }
+  finally {
+    closeSync(handle)
+  }
+  const header = tail.readUInt32BE(blockMapSize)
+  if (header !== blockMapSize) {
+    throw new Error(`内嵌 blockmap 长度头是 ${header}，与 blockMapSize ${blockMapSize} 不符`)
+  }
+  const parsed = JSON.parse(inflateRawSync(tail.subarray(0, blockMapSize)).toString('utf8'))
+  if (!Array.isArray(parsed.files) || parsed.files.length === 0) {
+    throw new Error('内嵌 blockmap 里没有 files 列表')
+  }
+  const covered = parsed.files.reduce((total, entry) => total + entry.sizes.reduce((a, b) => a + b, 0), 0)
+  if (covered !== bytes - blockMapSize - 4) {
+    throw new Error(`内嵌 blockmap 覆盖 ${covered} 字节，产物去掉 blockmap 后是 ${bytes - blockMapSize - 4} 字节`)
+  }
+  return {
+    chunks: parsed.files.reduce((total, entry) => total + entry.checksums.length, 0),
+    covered,
+    bytes,
+  }
 }
 
+const mode = process.argv[2]
+const target = process.argv[mode?.startsWith('--') === true ? 3 : 2]
+if (target === undefined) {
+  throw new Error('usage: make-blockmap.mjs [--verify|--embed] <artifact>')
+}
+
+if (mode === '--embed') {
+  const { buildBlockMap } = desktopRequire('app-builder-lib/out/targets/blockmap/blockmap.js')
+  // 不传 outFile 即内嵌模式：写 deflateRaw 压缩块 + 4 字节 BE 长度头。
+  const result = await buildBlockMap(target, 'deflate')
+  if (typeof result.blockMapSize !== 'number') {
+    throw new Error('buildBlockMap 没有返回 blockMapSize，内嵌可能没生效')
+  }
+  const verified = verifyEmbedded(target, result.blockMapSize)
+  process.stdout.write(
+    `内嵌 blockmap: ${result.blockMapSize} 字节  ${verified.chunks} 个块  `
+    + `覆盖 ${verified.covered} + ${result.blockMapSize} + 4 = ${verified.bytes} 字节  回读校验通过\n`,
+  )
+  // workflow 用这一行把 blockMapSize 填进 electron-updater 清单
+  process.stdout.write(`blockMapSize=${result.blockMapSize}\n`)
+  process.exit(0)
+}
+
+// 非 --embed：旁挂一个 .blockmap 文件（macOS zip 的路径）。
 const outFile = `${target}.blockmap`
-if (!verifyOnly) {
+if (mode !== '--verify') {
   const { buildBlockMap } = desktopRequire('app-builder-lib/out/targets/blockmap/blockmap.js')
   await buildBlockMap(target, 'gzip', outFile)
 }
