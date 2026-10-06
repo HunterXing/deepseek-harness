@@ -199,3 +199,57 @@ jobs:
         if: always()
         shell: bash
         run: df -h . 2>/dev/null | tail -1 | awk '{print "工作盘已用 "$3" / "$2"  可用 "$4}' | tee -a "$GITHUB_STEP_SUMMARY" || echo "磁盘信息不可用" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # 产物默认只落在 Actions artifact（30 天过期、藏在 run 页面里），
+  # 这里再发一份到 Releases：有稳定 URL、可长期保留、其他机器/脚本能直接引用，
+  # 也正好是自更新功能将来要用的版本源。
+  publish-release:
+    name: 发布到 Releases
+    needs: build
+    # 某个目标失败时仍然发布已成功的那些（if-no-files-found=error 保证不会发空 Release）
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+
+    steps:
+      - name: 下载本次 run 的全部产物
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dsh-*
+          merge-multiple: true
+          path: dist
+
+      - name: 读取仓库版本号
+        id: ver
+        run: |
+          V=$(node -p "require('$GITHUB_WORKSPACE/package.json').version")
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "tag=ci-$V-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "版本: $V  →  tag: ci-$V-${GITHUB_SHA::7}"
+
+      - name: 列出将发布的文件
+        run: ls -la dist/
+
+      - name: 创建 / 更新 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: 桌面产物 ${{ steps.ver.outputs.version }} (${{ github.sha }})
+          body: |
+            由自建流水线 `build-desktop.yml` 构建。
+
+            | 产物 | 平台 |
+            |---|---|
+            | `dsh-mac-x64` | macOS Intel (x86_64) |
+            | `dsh-mac-arm64` | macOS Apple Silicon (arm64) |
+            | `dsh-win-x64` | Windows x64 |
+
+            来源 commit: `${{ github.sha }}`
+            运行时版本: `${{ steps.ver.outputs.version }}`
+
+            **这些产物未签名。** macOS 首次打开需右键 → 打开（绕过 Gatekeeper），
+            没有自动更新，也不会出现在「关于本机」的系统扩展列表里。
+          files: dist/*
+          fail_on_unmatched_files: true
