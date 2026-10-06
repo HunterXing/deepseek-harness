@@ -267,3 +267,18 @@
 +  const child = spawn('/bin/sh', [script], { detached: true, stdio: 'ignore' })
 +  child.unref()
 +}
+--- a/apps/desktop/src/main.ts	2026-10-06 13:27:55
++++ b/apps/desktop/src/main.ts	2026-10-06 13:27:55
+@@ -1334,6 +1334,12 @@
+ }
+ 
+ const ownsDesktopInstance = claimDesktopSingleInstance(app, () => { focusPrimaryWindow() })
++
++// [dsh-local] 更新器走 Electron session（Chromium 网络栈）。经本地代理下载 393MB 产物时，
++// QUIC/HTTP2 会在接近结束时以 net::ERR_HTTP2_PROTOCOL_ERROR 中断，而 curl 走同一地址正常。
++// 退回 HTTP/1.1 后下载稳定；代价是网页视图加载略慢，不影响功能。
++app.commandLine.appendSwitch('disable-http2')
++app.commandLine.appendSwitch('disable-quic')
+ 
+ if (ownsDesktopInstance) void app.whenReady().then(main).catch(async (error: unknown) => {
+   const message = error instanceof Error ? error.message : String(error)
