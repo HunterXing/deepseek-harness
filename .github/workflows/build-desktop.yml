@@ -288,17 +288,17 @@ jobs:
           # 替换成旧版本号来定位上一版的 blockmap。
           NAME="dsh-${{ matrix.target }}-${VER}.exe"
           cp "$EXE" "out/$NAME"
-          # NSIS 自己会产 <exe>.blockmap，NsisUpdater 靠它做差分下载；
-          # 清单里缺 blockMapSize 时它会直接跳过差分，退化成整包下载。
-          BMAP_SRC="$(dirname "$EXE")/$(basename "$EXE").blockmap"
-          BMAP_SIZE=0
-          if [ -f "$BMAP_SRC" ]; then
-            cp "$BMAP_SRC" "out/$NAME.blockmap"
-            BMAP_SIZE=$(stat -c '%s' "out/$NAME.blockmap" 2>/dev/null || wc -c < "out/$NAME.blockmap")
-            echo "blockmap: $NAME.blockmap  $BMAP_SIZE 字节"
-          else
-            echo "::warning::NSIS 未产出 blockmap，本次更新将走整包下载"
+          # NSIS 的 blockmap 是**内嵌在 exe 末尾**的（electron-updater 走
+          # FileWithEmbeddedBlockMapDifferentialDownloader，从末尾读 blockMapSize+4 字节，
+          # 末 4 字节是 deflateRaw 压缩块长度的 BE 头），没有独立的 .exe.blockmap 文件。
+          # 构建时是 --publish never，electron-builder 不会自动追加，所以这里自己来。
+          # 顺序不能颠倒：内嵌会让文件变大，sha512 与 size 必须在它之后算。
+          BMAP_SIZE=$(node .ci/make-blockmap.mjs --embed "out/$NAME" | sed -n 's/^blockMapSize=//p')
+          if [ -z "$BMAP_SIZE" ] || [ "$BMAP_SIZE" -le 0 ]; then
+            echo "::error::未能内嵌 blockmap（blockMapSize=$BMAP_SIZE）"
+            exit 1
           fi
+          echo "内嵌 blockmapSize: $BMAP_SIZE"
           FEED="https://github.com/HunterXing/deepseek-harness/releases/download/ci-${{ matrix.target }}/"
           SHA=$(openssl dgst -sha512 -binary "out/$NAME" | openssl base64 -A)
           SIZE=$(stat -c '%s' "out/$NAME" 2>/dev/null || wc -c < "out/$NAME")
