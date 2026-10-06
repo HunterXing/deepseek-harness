@@ -117,6 +117,7 @@ jobs:
           DSH_DESKTOP_MANDATORY_UPDATE_PROD_ORIGIN=https://download.deepseek.com
           DSH_DESKTOP_MANDATORY_UPDATE_CONFIG='{"allowedAuthOrigins":["https://login.example.com"]}'
           DSH_DESKTOP_WINDOWS_SIGNATURE_CACHE_CONCURRENCY=4
+          DSH_DESKTOP_UPDATE_FEED_URL=https://github.com/HunterXing/deepseek-harness/releases/download/ci-${{ matrix.target }}/
           ENVEOF
           echo "写入的配置："
           grep -vE '^\s*#|^\s*$' apps/desktop/.env.windows | tail -9
@@ -172,7 +173,30 @@ jobs:
           # 必须用 ditto 打包：actions/upload-artifact 解包后会丢失可执行位和符号链接，
           # 直接上传 .app 目录会得到一个打不开的 app。
           ditto -c -k --sequesterRsrc --keepParent "$APP" "$OUT"
-          ls -la "$OUT"
+
+          # 生成 electron-updater 读取的清单。Squirrel.Mac 会按 sha512 校验下载到的 zip，
+          # 字段名/层级必须与 electron-builder 产出的一致。
+          VER=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")
+          NAME=$(basename "$OUT")
+          FEED="https://github.com/HunterXing/deepseek-harness/releases/download/ci-${{ matrix.target }}/"
+          SHA=$(openssl dgst -sha512 -binary "$OUT" | openssl base64 -A)
+          SIZE=$(stat -f '%z' "$OUT")
+          cat > out/latest-mac.yml <<YML
+          version: $VER
+          files:
+            - url: ${FEED}$NAME
+              sha512: $SHA
+              size: $SIZE
+          path: $NAME
+          sha512: $SHA
+          releaseDate: '$(date -u +%Y-%m-%dT%H:%M:%S.000Z)'
+          YML
+          echo "--- 生成的清单 ---"; sed 's/^/  /' out/latest-mac.yml
+          echo "--- app-update.yml 是否已写入（这是更新器 enabled() 的判据）---"
+          test -f "$APP/Contents/Resources/app-update.yml" \
+            && sed 's/^/  /' "$APP/Contents/Resources/app-update.yml" \
+            || { echo "  ::error::app-update.yml 未生成，OTA 不通"; exit 1; }
+          ls -la out/
 
       - name: 收集产物（Windows）
         if: matrix.platform == 'Windows'
@@ -185,7 +209,23 @@ jobs:
             echo "::error::未找到 .exe 产物"; find apps/desktop/.desktop-build/targets -maxdepth 3 | head -40; exit 1
           fi
           echo "找到产物：$EXE ($(du -sh "$EXE" | cut -f1))"
-          cp "$EXE" "out/dsh-${{ matrix.target }}-$(date +%Y%m%d)-$(basename "$EXE")"
+          NAME="dsh-${{ matrix.target }}-$(date +%Y%m%d)-$(basename "$EXE")"
+          cp "$EXE" "out/$NAME"
+          VER=$(node -p "require('$GITHUB_WORKSPACE/package.json').version")
+          FEED="https://github.com/HunterXing/deepseek-harness/releases/download/ci-${{ matrix.target }}/"
+          SHA=$(openssl dgst -sha512 -binary "out/$NAME" | openssl base64 -A)
+          SIZE=$(stat -c '%s' "out/$NAME" 2>/dev/null || wc -c < "out/$NAME")
+          cat > out/latest.yml <<YML
+          version: $VER
+          files:
+            - url: ${FEED}$NAME
+              sha512: $SHA
+              size: $SIZE
+          path: $NAME
+          sha512: $SHA
+          releaseDate: '$(date -u +%Y-%m-%dT%H:%M:%S.000Z)'
+          YML
+          sed 's/^/  /' out/latest.yml
           ls -la out/
 
       - uses: actions/upload-artifact@v4
@@ -203,53 +243,56 @@ jobs:
   # 产物默认只落在 Actions artifact（30 天过期、藏在 run 页面里），
   # 这里再发一份到 Releases：有稳定 URL、可长期保留、其他机器/脚本能直接引用，
   # 也正好是自更新功能将来要用的版本源。
+  # 产物默认只落在 Actions artifact（30 天过期、藏在 run 页面里）。
+  # 这里按架构各发一个 Release：tag 固定为 ci-<target>，每次构建覆盖同一份，
+  # 于是得到一个稳定的扁平地址，正好当 electron-updater 的 feed：
+  #   <feed>latest-mac.yml   清单（含 zip 的 sha512 与下载地址）
+  #   <feed>dsh-mac-x64-<日期>.zip
   publish-release:
-    name: 发布到 Releases
+    name: 发布 ${{ matrix.target }}
     needs: build
-    # 某个目标失败时仍然发布已成功的那些（if-no-files-found=error 保证不会发空 Release）
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [mac-x64, mac-arm64, win-x64]
 
     steps:
-      - name: 下载本次 run 的全部产物
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: 下载该架构的产物
         uses: actions/download-artifact@v4
         with:
-          pattern: dsh-*
-          merge-multiple: true
+          name: dsh-${{ matrix.target }}
           path: dist
 
       - name: 读取仓库版本号
         id: ver
-        run: |
-          V=$(node -p "require('$GITHUB_WORKSPACE/package.json').version")
-          echo "version=$V" >> "$GITHUB_OUTPUT"
-          echo "tag=ci-$V-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
-          echo "版本: $V  →  tag: ci-$V-${GITHUB_SHA::7}"
+        run: echo "version=$(node -p "require('$GITHUB_WORKSPACE/package.json').version")" >> "$GITHUB_OUTPUT"
 
-      - name: 列出将发布的文件
+      - name: 待发布文件
         run: ls -la dist/
 
-      - name: 创建 / 更新 Release
+      - name: 创建 / 覆盖 Release ci-${{ matrix.target }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.ver.outputs.tag }}
-          name: 桌面产物 ${{ steps.ver.outputs.version }} (${{ github.sha }})
+          tag_name: ci-${{ matrix.target }}
+          name: ${{ matrix.target }} ${{ steps.ver.outputs.version }}
           body: |
-            由自建流水线 `build-desktop.yml` 构建。
+            由 `build-desktop.yml` 自动构建并覆盖发布。
 
-            | 产物 | 平台 |
-            |---|---|
-            | `dsh-mac-x64` | macOS Intel (x86_64) |
-            | `dsh-mac-arm64` | macOS Apple Silicon (arm64) |
-            | `dsh-win-x64` | Windows x64 |
+            - 构建 commit：`${{ github.sha }}`
+            - 运行时版本：`${{ steps.ver.outputs.version }}`
+            - 更新源：<https://github.com/HunterXing/deepseek-harness/releases/download/ci-${{ matrix.target }}/>
 
-            来源 commit: `${{ github.sha }}`
-            运行时版本: `${{ steps.ver.outputs.version }}`
-
-            **这些产物未签名。** macOS 首次打开需右键 → 打开（绕过 Gatekeeper），
-            没有自动更新，也不会出现在「关于本机」的系统扩展列表里。
+            **产物未签名。** macOS 首次打开需右键 → 打开绕过 Gatekeeper；
+            未走官方公证，因此不进入系统「安全与隐私 → 已允许下载的应用」列表。
           files: dist/*
           fail_on_unmatched_files: true
+          overwrite_files: true
