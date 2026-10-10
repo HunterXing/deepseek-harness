@@ -30,6 +30,20 @@ index 464d079b4d..b669c353ce 100644
    let releasePrefix = 'dsh-desk'
    if (environment === 'test') {
      const releaseId = requiredEnvironmentValue(env, 'DOWNLOAD_TEST_RELEASE_ID')
+diff --git a/apps/desktop/scripts/electron-builder-config.mjs b/apps/desktop/scripts/electron-builder-config.mjs
+index 1fb787803c..9426354581 100644
+--- a/apps/desktop/scripts/electron-builder-config.mjs
++++ b/apps/desktop/scripts/electron-builder-config.mjs
+@@ -90,7 +88,8 @@ export function createElectronBuilderConfig(
+   if (windowsSigner !== undefined) {
+     installWindowsNsisBootstrapSigner({ sign: windowsSigner })
+   }
+-  const update = unsigned ? undefined : resolveDesktopAutoUpdateConfig(env, resolvedPlatform, resolvedArch)
++  // [dsh-local] 未签名构建也要写出 app-update.yml，否则内置更新器因 enabled() 判空而整体停用。
++  const update = resolveDesktopAutoUpdateConfig(env, resolvedPlatform, resolvedArch)
+   if (preparedRuntime !== undefined) buildPaths.dsh = preparedRuntime
+   // electron-builder merges extraMetadata into the packaged manifest, so a build version here reaches
+   // the artifact names, the update feed, and the installed app.getVersion() the updater compares against.
 diff --git a/apps/desktop/scripts/prepare-package-set.ts b/apps/desktop/scripts/prepare-package-set.ts
 index 7e7d62eea2..a1c929a250 100644
 --- a/apps/desktop/scripts/prepare-package-set.ts
