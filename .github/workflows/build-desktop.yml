@@ -140,16 +140,18 @@ jobs:
           git apply -p1 .ci/unsigned-macos.patch
           echo "已打补丁的文件："
           git status --porcelain | grep -E '^( M|\?\?)' | sed 's/^/  /'
-          # 逐个核对补丁声明的 9 个路径。不能用「数一下有多少个改动文件」代替：
+          # 逐个核对补丁声明的 5 个路径。不能用「数一下有多少个改动文件」代替：
           # 新增的 update-replace.ts 在 git status 里是 ?? 而不是 M，
           # 计数会把补丁整体少算一个，断言自己就成了摆设。
+          #
+          # 2026-10-10：原为 9 个路径。免签名相关的 4 个文件
+          # （electron-builder-config / package-target / prepare-dsh /
+          # smoke-packaged-runtime）已由上游自己实现并重写，补丁不再需要；
+          # 保留的是 dsh 独有能力：自研 bundle 替换、HTTP/2 与 QUIC 禁用、
+          # Windows tar 路径修复、更新 feed 地址推导。
           MISSING=0
           for f in apps/desktop/scripts/desktop-auto-update-environment.mjs \
-                   apps/desktop/scripts/electron-builder-config.mjs \
-                   apps/desktop/scripts/package-target.ts \
-                   apps/desktop/scripts/prepare-dsh.ts \
                    apps/desktop/scripts/prepare-package-set.ts \
-                   apps/desktop/scripts/smoke-packaged-runtime.ts \
                    apps/desktop/src/main.ts \
                    apps/desktop/src/update-coordinator.ts \
                    apps/desktop/src/update-replace.ts; do
@@ -159,13 +161,10 @@ jobs:
             fi
           done
           if [ "$MISSING" -ne 0 ]; then
-            echo "::error::补丁声明的 9 个文件里有 $MISSING 个未被改动，补丁与预期不符"
+            echo "::error::补丁声明的 5 个文件里有 $MISSING 个未被改动，补丁与预期不符"
             exit 1
           fi
-          for f in apps/desktop/scripts/electron-builder-config.mjs \
-                   apps/desktop/scripts/package-target.ts \
-                   apps/desktop/scripts/prepare-dsh.ts \
-                   apps/desktop/scripts/smoke-packaged-runtime.ts; do
+          for f in apps/desktop/scripts/prepare-package-set.ts; do
             node --check "$f" 2>/dev/null || npx --no-install tsc --noEmit --skipLibCheck "$f" 2>/dev/null || true
           done
           echo "语法检查完成"
