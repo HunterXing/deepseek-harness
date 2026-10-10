@@ -44,7 +44,9 @@ jobs:
           # 必须完整历史：rebase 需要共同祖先，浅克隆会直接失败
           # （本仓库 pack 约 325MB）
           fetch-depth: 0
-          persist-credentials: true
+          # 不持久化 GITHUB_TOKEN：推送改用 DSH_SYNC_TOKEN（PAT），
+          # 留着 GITHUB_TOKEN 只会让凭据来源含混两可。
+          persist-credentials: false
 
       - name: 挂载 upstream
         run: |
@@ -94,4 +96,24 @@ jobs:
         if: steps.check.outputs.changed == 'true'
         # rebase 会重写历史，必须 force；但用 --force-with-lease，
         # 若远端在我 fetch 之后被别人推过就拒绝，避免覆盖他人改动。
-        run: git push --force-with-lease origin master
+        #
+        # 为什么必须用 PAT 而不是 GITHUB_TOKEN：
+        # rebase 会把上游新增/修改的 .github/workflows/*.yml 一并带进来，
+        # 而 GitHub 硬性禁止 GITHUB_TOKEN 修改 workflow 文件（防 workflow 自我提权），
+        # push 会被拒：remote rejected ... without `workflows` permission。
+        # 这个限制**不是** permissions 块能解决的 —— 官方 GITHUB_TOKEN 权限键里
+        # 根本没有 `workflows`（只有 actions/checks/contents/... 十六个）。
+        # 唯一可行做法是用带 workflow scope 的 classic PAT（secret: DSH_SYNC_TOKEN）。
+        run: |
+          set -euo pipefail
+          [ -n "${{ secrets.DSH_SYNC_TOKEN }}" ] || {
+            echo "::error::缺少 secret DSH_SYNC_TOKEN，无法推送 workflow 文件"; exit 1; }
+          # token 走 http.extraHeader 而**不是**塞进 remote URL：
+          # 公开仓库的 Actions 日志任何人可读，而 push 失败时 git 会把
+          # remote URL 原样打进错误信息 —— 塞 URL 等于把 token 公开。
+          # extraHeader 不出现在任何 git 输出里。
+          git config http.https://github.com/.extraHeader \
+            "AUTHORIZATION: basic $(printf 'x-access-token:%s' '${{ secrets.DSH_SYNC_TOKEN }}' | base64 -w0)"
+          trap 'git config --unset-all http.https://github.com/.extraHeader || true' EXIT
+          git push --force-with-lease origin master
+          echo "  已推送，HEAD: $(git rev-parse --short HEAD)"
