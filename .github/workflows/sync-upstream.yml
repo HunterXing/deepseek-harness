@@ -26,6 +26,11 @@ on:
 
 permissions:
   contents: write
+  # rebase 会把上游新增/修改的 .github/workflows/*.yml 一并带进来，
+  # 改 workflow 文件必须显式要 workflows: write，否则 push 被远端拒绝
+  # （remote rejected: refusing to allow a GitHub App to create or update
+  #  workflow ... without `workflows` permission）。2026-10-09/10 连续两天挂在这一步。
+  workflows: write
 
 concurrency:
   group: sync-upstream
