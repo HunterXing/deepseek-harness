@@ -1,11 +1,10 @@
 diff --git a/apps/desktop/scripts/desktop-auto-update-environment.mjs b/apps/desktop/scripts/desktop-auto-update-environment.mjs
-index 464d079b4d..b669c353ce 100644
 --- a/apps/desktop/scripts/desktop-auto-update-environment.mjs
 +++ b/apps/desktop/scripts/desktop-auto-update-environment.mjs
-@@ -137,6 +137,27 @@ export function resolveDesktopAutoUpdateConfig(env, platform, arch) {
-     if (originEnvName === undefined) throw new Error('desktop auto-update: selected deployment has no origin')
-     origin = httpsOrigin(requiredEnvironmentValue(env, originEnvName), originEnvName)
-   }
+@@ -131,6 +131,27 @@
+   const environment = resolveDesktopAutoUpdateEnvironment(env)
+   const target = resolveDesktopAutoUpdateTarget(platform, arch)
+   const deployment = UPDATE_ENVIRONMENTS[environment]
 +  // [dsh-local] 允许直接指定扁平 feed 地址。GitHub Release 的附件是平铺的，
 +  // 没有 dsh-desk/<releaseId>/feeds/<target>/ 这类目录层级，而 origin 校验又要求
 +  // pathname === '/'。设了这个变量就直接用它当 publicUrl，跳过 origin/前缀拼装。
@@ -27,9 +26,9 @@ index 464d079b4d..b669c353ce 100644
 +      publicUrl: feedUrlOverride,
 +    }
 +  }
-   let releasePrefix = 'dsh-desk'
-   if (environment === 'test') {
-     const releaseId = requiredEnvironmentValue(env, 'DOWNLOAD_TEST_RELEASE_ID')
+   let origin = deployment.fixedOrigin
+   if (origin === undefined) {
+     const { originEnvName } = deployment
 diff --git a/apps/desktop/scripts/electron-builder-config.mjs b/apps/desktop/scripts/electron-builder-config.mjs
 index 1fb787803c..9426354581 100644
 --- a/apps/desktop/scripts/electron-builder-config.mjs
