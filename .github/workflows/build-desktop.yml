@@ -45,9 +45,6 @@ jobs:
           - target: mac-arm64
             os: macos-15
             platform: macOS
-          - target: win-x64
-            os: windows-latest
-            platform: Windows
 
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
@@ -356,7 +353,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [mac-x64, mac-arm64, win-x64]
+        target: [mac-x64, mac-arm64]
 
     steps:
       - uses: actions/checkout@v5
