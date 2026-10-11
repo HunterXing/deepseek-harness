@@ -252,7 +252,7 @@ jobs:
           FEED="https://github.com/HunterXing/deepseek-harness/releases/download/ci-${{ matrix.target }}/"
           SHA=$(openssl dgst -sha512 -binary "$OUT" | openssl base64 -A)
           SIZE=$(stat -f '%z' "$OUT")
-          cat > out/latest-mac.yml <<YML
+          cat > out/nightly-mac.yml <<YML
           version: $VER
           files:
             - url: ${FEED}$NAME
@@ -262,7 +262,7 @@ jobs:
           sha512: $SHA
           releaseDate: '$(date -u +%Y-%m-%dT%H:%M:%S.000Z)'
           YML
-          echo "--- 生成的清单 ---"; sed 's/^/  /' out/latest-mac.yml
+          echo "--- 生成的清单 ---"; sed 's/^/  /' out/nightly-mac.yml
           echo "--- app-update.yml 是否已写入（这是更新器 enabled() 的判据）---"
           test -f "$APP/Contents/Resources/app-update.yml" \
             && sed 's/^/  /' "$APP/Contents/Resources/app-update.yml" \
@@ -308,7 +308,7 @@ jobs:
           FEED="https://github.com/HunterXing/deepseek-harness/releases/download/ci-${{ matrix.target }}/"
           SHA=$(openssl dgst -sha512 -binary "out/$NAME" | openssl base64 -A)
           SIZE=$(stat -c '%s' "out/$NAME" 2>/dev/null || wc -c < "out/$NAME")
-          cat > out/latest.yml <<YML
+          cat > out/nightly.yml <<YML
           version: $VER
           files:
             - url: ${FEED}$NAME
@@ -319,7 +319,7 @@ jobs:
           sha512: $SHA
           releaseDate: '$(date -u +%Y-%m-%dT%H:%M:%S.000Z)'
           YML
-          sed 's/^/  /' out/latest.yml
+          sed 's/^/  /' out/nightly.yml
           ls -la out/
 
       - uses: actions/upload-artifact@v4
@@ -340,7 +340,10 @@ jobs:
   # 产物默认只落在 Actions artifact（30 天过期、藏在 run 页面里）。
   # 这里按架构各发一个 Release：tag 固定为 ci-<target>，每次构建覆盖同一份，
   # 于是得到一个稳定的扁平地址，正好当 electron-updater 的 feed：
-  #   <feed>latest-mac.yml   清单（含 zip 的 sha512 与下载地址）
+  #   <feed>nightly-mac.yml  清单（含 zip 的 sha512 与下载地址）
+#     文件名必须与上游 desktopUpdateMetadataFilename() 一致（它返回
+#     nightly-mac.yml / nightly.yml），否则应用内更新器按 app-update.yml 的
+#     channel: nightly 去取清单会 404，OTA 静默失效。
   #   <feed>dsh-mac-x64-<日期>.zip
   publish-release:
     name: 发布 ${{ matrix.target }}
@@ -376,7 +379,7 @@ jobs:
           # 逐个判断存在性，不用 `ls a b`：只要其中任意一个不存在，ls 就返回 2，
           # 而 set -e 会在命令替换处直接中止整个步骤，后面的空值检查根本走不到。
           YML=""
-          for candidate in dist/latest-mac.yml dist/latest.yml; do
+          for candidate in dist/nightly-mac.yml dist/nightly.yml; do
             if [ -f "$candidate" ]; then YML="$candidate"; break; fi
           done
           if [ -z "$YML" ]; then
