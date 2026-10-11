@@ -25,7 +25,10 @@ permissions:
 
 concurrency:
   group: desktop-build
-  cancel-in-progress: false
+  # 改成 true：新 push 立即掐掉上一次未完成的构建。
+  # 实测 cancel-in-progress: false 挡不住 GitHub 的排队上限 —— 连续 push 时
+  # 旧构建照样被 cancelled。宁可重跑，也不要产出一个缺平台/半成品的包。
+  cancel-in-progress: true
 
 jobs:
   build:
