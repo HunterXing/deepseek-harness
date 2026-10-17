@@ -1,7 +1,7 @@
 diff --git a/apps/desktop/scripts/desktop-auto-update-environment.mjs b/apps/desktop/scripts/desktop-auto-update-environment.mjs
 --- a/apps/desktop/scripts/desktop-auto-update-environment.mjs
 +++ b/apps/desktop/scripts/desktop-auto-update-environment.mjs
-@@ -131,6 +131,27 @@
+@@ -131,6 +131,28 @@
    const environment = resolveDesktopAutoUpdateEnvironment(env)
    const target = resolveDesktopAutoUpdateTarget(platform, arch)
    const deployment = UPDATE_ENVIRONMENTS[environment]
@@ -21,6 +21,7 @@ diff --git a/apps/desktop/scripts/desktop-auto-update-environment.mjs b/apps/des
 +      environment,
 +      target,
 +      origin: override.origin,
++      channel,
 +      keyPrefix: `${target}/feeds`,
 +      binaryKeyPrefix: `${target}/bin`,
 +      publicUrl: feedUrlOverride,
