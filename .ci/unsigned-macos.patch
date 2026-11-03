@@ -87,21 +87,21 @@ index b4b8153b7f..1e1e8ce2ea 100644
    const message = error instanceof Error ? error.message : String(error)
    console.error(error)
 diff --git a/apps/desktop/src/update-coordinator.ts b/apps/desktop/src/update-coordinator.ts
-index 8d6eb808e7..5432f9ca13 100644
+index 29cf2d88..2bd9a596 100644
 --- a/apps/desktop/src/update-coordinator.ts
 +++ b/apps/desktop/src/update-coordinator.ts
 @@ -6,6 +6,7 @@ import { app } from 'electron'
- import electronUpdater, { type AppUpdater, type ProgressInfo, type UpdateInfo } from 'electron-updater'
+ import electronUpdater, { type AppUpdater, type ProgressInfo, type UpdateInfo, type UpdateCheckResult } from 'electron-updater'
  import { gt, valid } from 'semver'
  import type { DesktopUpdateState } from './ipc.ts'
 +import { quitInstallByReplacingBundle } from './update-replace.ts'
- import { DesktopUpdateHttpExecutor } from './update-http-executor.ts'
- import { DesktopUpdatePreparationError } from './update-error.ts'
- 
-@@ -134,7 +135,9 @@ export class DesktopUpdateCoordinator {
-       try {
+ import { DesktopUpdateHttpExecutor } from './updates/electron-updater/http-executor.ts'
+ import { DesktopUpdatePreparationError, downloadFailureDetails } from './update-error.ts'
+ import type { DesktopUpdateChannel } from './update-channel.ts'
+@@ -215,7 +216,9 @@ export class DesktopUpdateCoordinator {
          if (!await this.beforeRestart()) return this.setState({ phase: 'ready', version })
          this.assertLive()
+         this.release = { kind: 'handed-off', version }
 -        this.updater.quitAndInstall(true, true)
 +        // [dsh-local] Squirrel.Mac 无法完成本 bundle 的替换，改由自研脚本在退出后执行。
 +        quitInstallByReplacingBundle(process.pid)
