@@ -410,3 +410,87 @@ jobs:
           files: dist/*
           fail_on_unmatched_files: true
           overwrite_files: true
+
+      # 清理旧版本资产：只保留当前版本，删掉历史包。
+      # 为什么要做：Release 资产只增不减，几个月就攒到十几 GB，
+      # 而 OTA 的更新源是固定 tag（ci-mac-x64），根本不需要历史 zip。
+      #
+      # ⚠️ 但**不能把历史 blockmap 全删光**：
+      # electron-updater 的差分下载靠「把 URL 里的新版本号替换成旧版本号」
+      # 去定位客户端已安装版本的 blockmap（providers/Provider.js:24，
+      # 调用处 AppUpdater.js:649 传的是 this.app.version）。
+      # 旧 blockmap 没了 → 差分静默退化成整包下载，用户无感但体验崩。
+      # 所以额外保留**上一版本的 .zip.blockmap**（几百 KB，不是大头）。
+      #
+      # 这一步放最后且不阻断：发布成功是主目标，清理失败不该让流水线变红。
+      - name: 清理旧版本资产（只保留当前版本）
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ci-${{ matrix.target }}
+          CURRENT_VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -uo pipefail
+          KEEP_FIXED="nightly-mac.yml latest-mac.yml nightly.yml"
+          echo "当前版本: $CURRENT_VERSION"
+
+          # 一次取全部资产（id + name + 大小），避免循环里反复请求
+          ASSETS_JSON=$(gh api "repos/${{ github.repository }}/releases/tags/$TAG_NAME" \
+            --jq '[.assets[] | {id: .id, name: .name, size: .size}]' 2>/dev/null)
+          if [ -z "$ASSETS_JSON" ] || [ "$ASSETS_JSON" = "[]" ]; then
+            echo "::warning::读不到 Release 资产列表，跳过清理"
+            exit 0
+          fi
+
+          # 上一版本 = 除当前版本外、版本号最大的那个。
+          # 版本号形如 0.2.2-alpha.3.20261103.42，按字符串排序即可
+          # （日期段 + run 号在后，字典序与时间序一致）。
+          PREV_VERSION=$(echo "$ASSETS_JSON" | jq -r '
+            [ .[] | select(.name | test("\\.zip\\.blockmap$"))
+              | .name | sub("^dsh-[a-z0-9-]+-"; "") | sub("\\.zip\\.blockmap$"; "") ]
+            | map(select(. != $cur)) | sort | last // empty' --arg cur "$CURRENT_VERSION")
+          echo "上一版本: ${PREV_VERSION:-（无）}"
+
+          DELETED=0
+          KEPT=0
+          FREED=0
+          while IFS=$'\t' read -r id name size; do
+            [ -z "$id" ] && continue
+            keep=0
+            # 1) 清单（固定名，不带版本号）
+            case " $KEEP_FIXED " in
+              *" $name "*) keep=1; reason="清单" ;;
+            esac
+            # 2) 当前版本
+            if [ "$keep" -eq 0 ]; then
+              case "$name" in
+                *"$CURRENT_VERSION"*) keep=1; reason="当前版本" ;;
+              esac
+            fi
+            # 3) 上一版本的 blockmap（供差分下载）
+            if [ "$keep" -eq 0 ] && [ -n "$PREV_VERSION" ]; then
+              case "$name" in
+                *"$PREV_VERSION"*.zip.blockmap) keep=1; reason="上一版blockmap(差分用)" ;;
+              esac
+            fi
+
+            if [ "$keep" -eq 1 ]; then
+              echo "  保留[$reason] $name"
+              KEPT=$((KEPT + 1))
+              continue
+            fi
+
+            echo "  删除 $name (${size}B)"
+            if gh api --method DELETE \
+                "repos/${{ github.repository }}/releases/assets/$id" >/dev/null 2>&1; then
+              DELETED=$((DELETED + 1))
+              FREED=$((FREED + size))
+            else
+              echo "::warning::删除失败 $name"
+            fi
+          done < <(echo "$ASSETS_JSON" | jq -r '.[] | "\(.id)\t\(.name)\t\(.size)"')
+
+          echo "清理完成：删除 $DELETED 个（释放约 $((FREED / 1024 / 1024)) MB），保留 $KEPT 个"
+          echo "当前剩余资产："
+          gh api "repos/${{ github.repository }}/releases/tags/$TAG_NAME" \
+            --jq '.assets[] | "  \(.name)  \(.size)B"' 2>/dev/null || true
