@@ -40,6 +40,57 @@ node .ci/make-blockmap.mjs --verify <artifact.zip>  # 只校验已有 blockmap
 `Provider.getBlockMapFiles` 是把 URL 里的新版本号替换成旧版本号来定位上一版
 blockmap 的，名字里没有版本号就找不到，差分必然退化成全量下载。
 
+## Release 资产只保留最新版本
+
+`ci-mac-x64` / `ci-mac-arm64` 两个 Release 的资产**只增不减**：
+`softprops/action-gh-release` 的 `overwrite_files: true` 只覆盖**同名**文件，
+而每次构建的产物文件名都带新版本号，历史 zip 就全留着了。
+实测一度累积到 31 / 30 个资产、约 **11GB** 历史包。
+
+OTA 的更新源是固定 tag（`ci-mac-x64`），根本不需要历史 zip。
+所以 `build-desktop.yml` 的 `publish-release` job 在发布之后加了一步
+「清理旧版本资产」，每次发布自动删掉历史包。
+
+### 保留什么、删什么
+
+| 资产 | 处理 | 理由 |
+|---|---|---|
+| `nightly-mac.yml` / `latest-mac.yml` / `nightly.yml` | **保留** | electron-updater 的更新入口 |
+| 当前版本的 `.zip` + `.zip.blockmap` | **保留** | 本次发布的产物 |
+| **上一版本的 `.zip.blockmap`** | **保留** | 差分下载要用（见下） |
+| 历史版本的 `.zip` | 删除 | 大头（每个 370–390MB） |
+| 历史版本的 `.zip.blockmap`（非上一版） | 删除 | 只有上一版会被差分引用 |
+| 无版本号的遗留包（如 `dsh-mac-x64-<sha>.zip`） | 删除 | 既非当前版本，又让差分定位失效 |
+
+### 为什么不能把历史 blockmap 全删光
+
+electron-updater 的差分下载靠「把 URL 里的新版本号替换成旧版本号」
+去定位**客户端已安装版本**的 blockmap：
+
+```js
+// electron-updater 6.8.9  package/out/providers/Provider.js:24
+getBlockMapFiles(baseUrl, oldVersion, newVersion, oldBlockMapFileBaseUrl = null) {
+    const oldBlockMapUrl = newUrlFromBase(
+      `${baseUrl.pathname.replace(new RegExp(escapeRegExp(newVersion), "g"), oldVersion)}.blockmap`, ...);
+    return [oldBlockMapUrl, newBlockMapUrl];
+}
+```
+调用处 `package/out/AppUpdater.js:649` 传的 `oldVersion` 是 `this.app.version`
+—— 客户端**当前装着的**版本。
+
+旧 blockmap 删光 → 差分**静默退化成整包下载**（几百 MB），用户完全无感但体验崩。
+上一版的 blockmap 只有几百 KB，保留它不影响瘦身效果。
+
+### 改这个清理逻辑时注意
+
+- 清理步骤**放在发布之后**且**不阻断**（`set -uo pipefail`，不用 `-e`）：
+  发布成功是主目标，清理失败只发 `::warning::`，不该让整条流水线变红。
+- 「上一版本」是**除当前版本外版本号最大**的那个。版本号形如
+  `0.2.2-alpha.3.20261103.42`，日期段 + run 号在后，字典序 == 时间序。
+- 改 workflow 后**本地验三道**再推（推上去才知道对不对，本地验更便宜）：
+  `yaml.safe_load` 能解析 → 抽出的 shell 过 `bash -n` → **actionlint**。
+  判别逻辑还要用真实资产数据真跑一遍（劫持 `gh` 命令做 dry-run）。
+
 ## 补丁失效了怎么办
 
 上游一旦改动这 9 个文件，`git apply --check` 会失败，**构建会响亮中止** —— 这是刻意的：
