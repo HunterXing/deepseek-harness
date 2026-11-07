@@ -33,10 +33,21 @@ def sha256_of(path: Path) -> str:
     return digest.hexdigest()
 
 
+def mirrors(url: str) -> list[str]:
+    """同一份字节的备用来源；sha256 校验兜底，故多源不会引入偏差。"""
+    fallbacks: list[str] = []
+    if url.startswith("https://nodejs.org/dist/"):
+        # nodejs.org 走代理偶发 rc=35 连不上，npmmirror 同步同一份 dist
+        fallbacks.append("https://npmmirror.com/mirrors/node/" + url[len("https://nodejs.org/dist/"):])
+    return fallbacks
+
+
 def assets_for(lock: dict, target: str) -> list[tuple[str, str]]:
     """Return (url, sha256) pairs the target needs, matching prepare.ts's download order."""
     entry = lock["targets"][target]
-    node_url = f"https://nodejs.org/dist/v{lock['nodeVersion']}/{entry['nodeArchive']}"
+    # 真实文件名是 node-v<版本>-<后缀>，entry['nodeArchive'] 只是后缀（linux-x64.tar.gz）
+    node_url = (f"https://nodejs.org/dist/v{lock['nodeVersion']}/"
+                f"node-v{lock['nodeVersion']}-{entry['nodeArchive']}")
     python_name = (f"cpython-{lock['pythonVersion']}+{lock['pythonRelease']}-"
                    f"{entry['pythonTarget']}-install_only_stripped.tar.gz")
     python_url = ("https://github.com/astral-sh/python-build-standalone/releases/download/"
@@ -66,25 +77,35 @@ def main() -> int:
         if destination.is_file() and sha256_of(destination) == expected:
             skipped += 1
             continue
-        print(f">>> 下载 {url}", flush=True)
-        # curl 用 --fail：HTTP 错误直接非零退出，不留半个文件；-C - 断点续传；重试 3 次
-        result = subprocess.run(
-            ["curl", "-fL", "--retry", "3", "--retry-delay", "2", "-C", "-",
-             "--connect-timeout", "20", "--max-time", "900",
-             "-o", str(destination), url],
-            capture_output=True, text=True)
-        if result.returncode != 0:
-            print(f"    失败 rc={result.returncode}: {result.stderr.strip()[:200]}", file=sys.stderr)
-            destination.unlink(missing_ok=True)
+        ok = False
+        for candidate in [url, *mirrors(url)]:
+            print(f">>> 下载 {candidate}", flush=True)
+            # --http1.1：这台机器上走代理时 HTTP/2 会吞掉重定向的 location 头，
+            # 表现为 curl rc=35（SSL connect error）——改用 HTTP/1.1 即稳。
+            # --retry-all-errors：rc=35/28 这类也要重试，不能只重试 HTTP 码。
+            # --speed-limit/--speed-time：卡住的连接（<1KB/s 持续 30s）主动断开换源。
+            result = subprocess.run(
+                ["curl", "-fL", "--http1.1", "--retry", "5", "--retry-all-errors", "--retry-delay", "3",
+                 "--speed-limit", "1024", "--speed-time", "30",
+                 "-C", "-", "--connect-timeout", "20", "--max-time", "900",
+                 "-o", str(destination), candidate],
+                capture_output=True, text=True)
+            if result.returncode != 0:
+                print(f"    失败 rc={result.returncode}: {result.stderr.strip()[:160]}", file=sys.stderr)
+                destination.unlink(missing_ok=True)
+                continue
+            actual = sha256_of(destination)
+            if actual != expected:
+                print(f"    校验失败 期望 {expected[:12]} 实得 {actual[:12]}", file=sys.stderr)
+                destination.unlink(missing_ok=True)
+                continue
+            ok = True
+            break
+        if ok:
+            fetched += 1
+        else:
             failed += 1
-            continue
-        actual = sha256_of(destination)
-        if actual != expected:
-            print(f"    校验失败 期望 {expected[:12]} 实得 {actual[:12]}", file=sys.stderr)
-            destination.unlink(missing_ok=True)
-            failed += 1
-            continue
-        fetched += 1
+        continue
 
     print(f"缓存就绪：新下载 {fetched}，已存在 {skipped}，失败 {failed}（共 {len(items)} 项）")
     return 1 if failed else 0
