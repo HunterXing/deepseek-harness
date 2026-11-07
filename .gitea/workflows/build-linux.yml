@@ -31,7 +31,8 @@ concurrency:
 
 jobs:
   linux:
-    runs-on: ubuntu-latest
+    # 专用 runner 的标签：它映射到 dsh-linux-builder 镜像（基镜像 + Electron 运行时库）
+    runs-on: dsh-linux
     timeout-minutes: 100
 
     steps:
@@ -88,22 +89,21 @@ jobs:
           node --version
           pnpm --version
 
-      # 这个 runner 镜像是「Ubuntu + Rust」的精简版，没有 Electron 的运行时库。
-      # 缺 libnspr4 时 prepare-runtime 一执行打包用的 electron 二进制就报
-      # "error while loading shared libraries: libnspr4.so"，整个构建在第 8 分钟挂掉。
-      - name: 装系统依赖（Electron 运行时库）
+      # Electron 的 Linux 运行时库烘在 dsh-linux-builder 镜像里，**不要在 job 里 apt**：
+      # 容器里 apt 走宿主 Clash 会 502（archive.ubuntu.com 代理不通），直连会卡住
+      # （实测一轮 apt-get update 挂了 11 分钟）。这里只做一次存在性断言，
+      # 缺库时立刻失败并说清楚要重建镜像，而不是等到第 8 分钟 prepare-runtime 才炸。
+      - name: 校验 runner 镜像（Electron 运行时库）
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            libnspr4 libnss3 libgbm1 libasound2t64 libxss1 libxtst6 \
-            libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 \
-            libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libpango-1.0-0 \
-            libcairo2 libgtk-3-0
-          # 断言：库真的进了 ldconfig 缓存；没进说明 apt 装错了包名（24.04 是 libasound2t64）
-          sudo ldconfig -p | grep -q libnspr4.so
-          sudo ldconfig -p | grep -q libnss3.so
+          for lib in libnspr4.so libnss3.so libgbm.so.1; do
+            if ! ldconfig -p | grep -q "$lib"; then
+              echo "::error::runner 镜像缺 $lib：docker build -t dsh-linux-builder:1 builder/"
+              exit 1
+            fi
+            echo "  ok $lib"
+          done
 
       - name: 装依赖
         shell: bash
