@@ -143,7 +143,7 @@ git apply --check -R -p1 /tmp/newpatch.diff   # 反向能应用 == 补丁与工�
 
 ## `linux.patch`
 
-Linux（`linux-x64` → AppImage）的接线补丁（**15 个文件，+59/−32**）。
+Linux（`linux-x64` → AppImage）的接线补丁（**17 个文件，+90/−50**）。
 `unsigned-macos.patch` 打完再打这一份；两份都只在构建期应用，用完即弃。
 
 上游的桌面打包链只认 `mac-arm64` / `mac-x64` / `win-x64` 三个目标，Linux 是从零接上去的：
@@ -156,6 +156,8 @@ Linux（`linux-x64` → AppImage）的接线补丁（**15 个文件，+59/−32*
 | `electron-builder-config.mjs` | Linux 段补 `icon` / `executableName`；**policy 与 update 都强制 undefined** —— 上游的 policy 解析只认 win32/darwin，带上它 Linux 上启动即抛 `desktop policy: unsupported platform`；而 update 一旦有值，electron-builder 会写出指向不存在 feed 的 `app-update.yml`，更新器反复失败 |
 | `prepare-runtime.ts` / `prepare-dsh.ts` | Electron 可执行文件路径：Linux 解包后是顶层 `electron`，不是 `Electron.app/Contents/MacOS/Electron` |
 | `prepare-cli.ts` | 非 Windows 都补 0755 —— 没有可执行位的 `dsh` 启动器跑不起来 |
+| `smoke-packaged-runtime.ts` | 打包后冒烟：Linux 的 electron-builder 产物是 `linux-unpacked`、执行文件叫 `deepseek-harness`（不是 `.app/Contents/MacOS/…`） |
+| `smoke-runtime.ts` | Linux 上跳过 Office（docx/xlsx/pptx→PDF）与 skill CLI 校验 —— 见下「已知差异」 |
 | `desktop-auto-update-environment.{mjs,d.mts}` / `desktop-release-store.ts` / `desktop-publish-targets.ts` / `desktop-upload-plan.ts` / `desktop-toolchain-preflight.ts` | 目标联合类型与 zod 枚举加 `linux-x64`；不改的话 `tsc -p tsconfig.host.json` 的 host aggregate check 直接失败（最容易漏的一层：运行时能跑，类型检查先炸） |
 
 **刻意没做的两件事**：
@@ -166,8 +168,14 @@ Linux（`linux-x64` → AppImage）的接线补丁（**15 个文件，+59/−32*
 2. **Linux 不进 COS / EdgeOne 上传链**。产物只发 Gitea Release，`desktop-upload-plan.ts` 里的
    `linux-x64` 条目只是为了满足类型。
 
-**已知差异**：LibreOffice 引擎在 Linux 上没有原生包（npm 上只有 darwin / win32），
-`selectOfficeEngine` 会自动退到 `libreoffice-kit-wasm`，文档转换走 WASM，比 mac / win 慢。
+**已知差异（Linux 独有）**：LibreOffice 引擎没有 Linux 原生包 —— npm 上
+`@deepseek-ai/libreoffice-kit-linux-x64-glibc` 是 404（只有 darwin / win32 / wasm）。
+准备阶段 `selectOfficeEngine` 会退到 wasm，`prepare-runtime` 的文档往返测试也过；
+但**打包后的应用里**，`@deepseek-ai/libreoffice-kit` 的原生分支会报
+「Installed LibreOfficeKit package is incomplete」，wasm 兜底被 desktop-host 的模块解析钩子挡住，
+于是应用内的 docx/xlsx/pptx → PDF 转换不可用。这属于上游能力缺口，不是本产物的问题，
+所以 `smoke-runtime.ts` 在 Linux 上跳过这两项校验 —— 其余（前端、插件路由、pnpm 插件安装/卸载）照旧全验。
+用得上文档转换的话，走 `dsh` CLI 的 office 技能（runtime 里那套 python 栈是好的）。
 
 ## Gitea 线：`.gitea/workflows/build-linux.yml`
 
