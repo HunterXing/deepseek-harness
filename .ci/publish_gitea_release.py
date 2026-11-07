@@ -33,6 +33,11 @@ from pathlib import Path
 
 TIMEOUT = 600
 
+# 直连，绝不走代理：容器里 https_proxy 指向宿主 Clash，Python 的 ssl 走它会
+# `ssl.SSLEOFError: EOF occurred in violation of protocol`（实测把发布步骤打挂）。
+# Gitea 在自家内网/公网都直连可达，不需要代理。
+OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
 
 def call(base: str, path: str, token: str, method: str = "GET", body=None,
          raw: bytes | None = None, ctype: str | None = None):
@@ -47,7 +52,7 @@ def call(base: str, path: str, token: str, method: str = "GET", body=None,
         headers["Content-Type"] = ctype or "application/octet-stream"
     req = urllib.request.Request(base + path, data=data, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as response:
+        with OPENER.open(req, timeout=TIMEOUT) as response:
             payload = response.read()
             if payload[:1] in (b"{", b"["):
                 return response.status, json.loads(payload)

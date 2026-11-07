@@ -181,10 +181,14 @@ jobs:
         working-directory: /root/dsh
         env:
           REPO_TOKEN: ${{ secrets.REPO_TOKEN }}
+          # 内网 API 地址放 secret：公网域名在推大文件（371MB 的 AppImage）时会被重置，
+          # 内网直连一次就过；这个地址也不该出现在公开仓库的文件里。
+          DSH_API_BASE: ${{ secrets.DSH_API_BASE }}
         run: |
           set -euo pipefail
+          API_BASE="${DSH_API_BASE:-https://gitea.xingheng.work/api/v1}"
           python3 .ci/publish_gitea_release.py \
-            --api "https://gitea.xingheng.work/api/v1" \
+            --api "$API_BASE" \
             --repo "${GITHUB_REPOSITORY}" \
             --tag ci-linux \
             --title "linux-x64 ${VERSION}" \
