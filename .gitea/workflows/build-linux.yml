@@ -88,6 +88,23 @@ jobs:
           node --version
           pnpm --version
 
+      # 这个 runner 镜像是「Ubuntu + Rust」的精简版，没有 Electron 的运行时库。
+      # 缺 libnspr4 时 prepare-runtime 一执行打包用的 electron 二进制就报
+      # "error while loading shared libraries: libnspr4.so"，整个构建在第 8 分钟挂掉。
+      - name: 装系统依赖（Electron 运行时库）
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libnspr4 libnss3 libgbm1 libasound2t64 libxss1 libxtst6 \
+            libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 \
+            libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libpango-1.0-0 \
+            libcairo2 libgtk-3-0
+          # 断言：库真的进了 ldconfig 缓存；没进说明 apt 装错了包名（24.04 是 libasound2t64）
+          sudo ldconfig -p | grep -q libnspr4.so
+          sudo ldconfig -p | grep -q libnss3.so
+
       - name: 装依赖
         shell: bash
         working-directory: /root/dsh
