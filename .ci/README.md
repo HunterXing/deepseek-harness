@@ -186,3 +186,12 @@ Linux 包的独立发布线，跑在自有 Gitea（`gitea.xingheng.work`）的 r
 
 三条约束写在 workflow 头部注释里，动之前先读：不能出现 `uses:`（runner 拉不到 github.com 上的 action）、
 代理必须显式导出（含 `NODE_USE_ENV_PROXY=1`，否则 Python 轮子那批 fetch 直接超时）、二进制与 npm 走国内镜像。
+
+**这台机器上的部署清单**（换机或重建时按这个来）：
+
+| 组件 | 值 |
+|---|---|
+| runner 容器 | `dsh-gitea-runner`，label `dsh-linux` → 镜像 `dsh-linux-builder:1`，容量 1 |
+| 构建镜像 | `builder/Dockerfile`（`x-md-runner:rust` + Electron 运行时库），`docker build --network host -t dsh-linux-builder:1 builder/` |
+| repo secret | `REPO_TOKEN`（仓库读写，clone 与发 Release 都用它）、`DSH_API_BASE`（内网 API 基址；公网域名推大文件会被重置，且这个地址不该进公开文件） |
+| 同步任务 | `~/.hermes/scripts/dsh-gitea-sync.sh`（Hermes cron `dsh-gitea-sync`，每 2 小时，静默同步） |
