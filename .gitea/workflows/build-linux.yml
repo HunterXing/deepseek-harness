@@ -97,12 +97,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # 用绝对路径查文件，不要用 `ldconfig -p`：act_runner 的 step shell 是
+          # `bash --noprofile --norc`，PATH 里没有 /sbin，ldconfig 会「命令不存在」，
+          # 于是断言在 30ms 内就误报「缺库」（踩过）。
           for lib in libnspr4.so libnss3.so libgbm.so.1; do
-            if ! ldconfig -p | grep -q "$lib"; then
+            found=""
+            for dir in /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu /usr/lib64 /usr/lib; do
+              if [ -e "$dir/$lib" ]; then found="$dir/$lib"; break; fi
+            done
+            if [ -z "$found" ]; then
               echo "::error::runner 镜像缺 $lib：docker build -t dsh-linux-builder:1 builder/"
               exit 1
             fi
-            echo "  ok $lib"
+            echo "  ok $found"
           done
 
       - name: 装依赖
