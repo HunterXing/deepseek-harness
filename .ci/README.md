@@ -140,3 +140,41 @@ git apply --check -R -p1 /tmp/newpatch.diff   # 反向能应用 == 补丁与工�
 3. 把打包命令的 `--unsigned --dir` 去掉
 
 公证可以在 CI 侧完成，Apple 不要求构建机是 Mac。
+
+## `linux.patch`
+
+Linux（`linux-x64` → AppImage）的接线补丁（**15 个文件，+59/−32**）。
+`unsigned-macos.patch` 打完再打这一份；两份都只在构建期应用，用完即弃。
+
+上游的桌面打包链只认 `mac-arm64` / `mac-x64` / `win-x64` 三个目标，Linux 是从零接上去的：
+
+| 文件 | 改什么 |
+|---|---|
+| `desktop-build-paths.mjs`（+`.d.mts`） | 支持目标集合与「目标→平台」映射加 `linux-x64` |
+| `package-target.ts` | 目标表加 `linux-x64`（`--linux` / `--x64`）；Linux 目标要求 Linux 构建机；免签名 Linux 复用 macOS 那套「本地默认环境」（不读 `.env.macos`、不带更新策略）；非 Windows 的打包并发取 4 |
+| `desktop-package-environment.mjs`（+`.d.mts`） | 校验阶段跳过 macOS / Windows 的签名与策略解析 |
+| `electron-builder-config.mjs` | Linux 段补 `icon` / `executableName`；**policy 与 update 都强制 undefined** —— 上游的 policy 解析只认 win32/darwin，带上它 Linux 上启动即抛 `desktop policy: unsupported platform`；而 update 一旦有值，electron-builder 会写出指向不存在 feed 的 `app-update.yml`，更新器反复失败 |
+| `prepare-runtime.ts` / `prepare-dsh.ts` | Electron 可执行文件路径：Linux 解包后是顶层 `electron`，不是 `Electron.app/Contents/MacOS/Electron` |
+| `prepare-cli.ts` | 非 Windows 都补 0755 —— 没有可执行位的 `dsh` 启动器跑不起来 |
+| `desktop-auto-update-environment.{mjs,d.mts}` / `desktop-release-store.ts` / `desktop-publish-targets.ts` / `desktop-upload-plan.ts` / `desktop-toolchain-preflight.ts` | 目标联合类型与 zod 枚举加 `linux-x64`；不改的话 `tsc -p tsconfig.host.json` 的 host aggregate check 直接失败（最容易漏的一层：运行时能跑，类型检查先炸） |
+
+**刻意没做的两件事**：
+
+1. **不做 Linux 自动更新**。AppImage 接 electron-updater 要另写 `latest-linux.yml` 与可用的 feed，
+   当前需求是「产物在自己机器上、手动下载快」。Linux 目标因此把 update 置空，
+   产物里没有 `app-update.yml`，更新器整体停用 —— 与「手动下载」的预期一致，不会对着空地址报错。
+2. **Linux 不进 COS / EdgeOne 上传链**。产物只发 Gitea Release，`desktop-upload-plan.ts` 里的
+   `linux-x64` 条目只是为了满足类型。
+
+**已知差异**：LibreOffice 引擎在 Linux 上没有原生包（npm 上只有 darwin / win32），
+`selectOfficeEngine` 会自动退到 `libreoffice-kit-wasm`，文档转换走 WASM，比 mac / win 慢。
+
+## Gitea 线：`.gitea/workflows/build-linux.yml`
+
+Linux 包的独立发布线，跑在自有 Gitea（`gitea.xingheng.work`）的 runner 上，产物发到本仓库 Release
+（tag `ci-linux`、文件名固定 `dsh-linux-x64.AppImage`），下载地址因此永久稳定。
+
+与 GitHub 线的关系：**代码同源**（同一分支、同一套补丁），**产物分工** —— GitHub 出 macOS，Gitea 出 Linux。
+
+三条约束写在 workflow 头部注释里，动之前先读：不能出现 `uses:`（runner 拉不到 github.com 上的 action）、
+代理必须显式导出（含 `NODE_USE_ENV_PROXY=1`，否则 Python 轮子那批 fetch 直接超时）、二进制与 npm 走国内镜像。
