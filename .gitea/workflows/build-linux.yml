@@ -135,6 +135,16 @@ jobs:
           grep -q "process.platform === 'darwin' ? 'Electron.app/Contents/MacOS/Electron' : 'electron'" apps/desktop/scripts/prepare-dsh.ts
           git --no-pager diff --stat
 
+      # prepare-runtime 用 Node 的 fetch 下载 node / python / wheels，在 runner 容器里会偶发
+      # "TypeError: fetch failed"（同样的 URL 用 curl 或换台机器都正常，属于容器网络 + undici 的不可靠）。
+      # 这些归档是**按 sha256 命名的缓存**，构建前用 curl 预取进去，prepare-runtime 就不会再发请求。
+      - name: 预取运行时归档（curl，绕开 Node fetch）
+        shell: bash
+        working-directory: /root/dsh
+        run: |
+          set -euo pipefail
+          python3 .ci/prefetch_runtime_assets.py --repo /root/dsh --target linux-x64
+
       - name: 构建 AppImage
         shell: bash
         working-directory: /root/dsh
