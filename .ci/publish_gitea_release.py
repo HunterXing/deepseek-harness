@@ -77,6 +77,19 @@ def fail(message: str) -> "NoReturn":  # type: ignore[valid-type]
     raise SystemExit(1)
 
 
+def release_body(version: str) -> str:
+    """下载后要做的两步写进 Release 正文：curl 下载不带可执行位，不 chmod 会 Permission denied。"""
+    return (
+        f"Linux AppImage，版本 `{version}`。由 Gitea Actions 自动构建并覆盖发布。\n\n"
+        "```sh\n"
+        "curl -fL -O <Release 里的 AppImage 下载地址>\n"
+        "chmod +x dsh-linux-x64.AppImage   # 必须：curl 下载不带可执行位\n"
+        "./dsh-linux-x64.AppImage\n"
+        "```\n\n"
+        "跑起来报 sandbox 相关错误时加 `--no-sandbox`（Debian 中枢实测不加也能起）。"
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--api", required=True, help="例如 https://gitea.xingheng.work/api/v1")
@@ -105,7 +118,7 @@ def main() -> None:
             "tag_name": args.tag,
             "target_commitish": "master",
             "name": args.title,
-            "body": f"Linux AppImage，版本 `{args.version}`。由 Gitea Actions 自动构建并覆盖发布。",
+            "body": release_body(args.version),
             "draft": False,
             "prerelease": True,
         })
@@ -119,7 +132,7 @@ def main() -> None:
         status, updated = call(api, f"/repos/{repo}/releases/{release_id}", token, method="PATCH", body={
             "tag_name": args.tag,
             "name": args.title,
-            "body": f"Linux AppImage，版本 `{args.version}`。由 Gitea Actions 自动构建并覆盖发布。",
+            "body": release_body(args.version),
             "prerelease": True,
         })
         if status != 200:
@@ -133,15 +146,15 @@ def main() -> None:
     status, assets = call(api, f"/repos/{repo}/releases/{release_id}/assets", token)
     if status != 200:
         fail(f"读取资产列表失败：HTTP {status} {assets!r}")
+    # 删除接口必须带 release_id：/releases/assets/{id} 是 404（Gitea 没有这个路由），
+    # 而 404 被静默吞掉的表现就是「旧资产没删掉、上传后同名两份」——所以这里逐个断言状态码。
     for asset in assets:
-        if asset["name"] in wanted:
-            print(f"  替换同名资产 {asset['name']}")
-            call(api, f"/repos/{repo}/releases/assets/{asset['id']}", token, method="DELETE")
-        else:
-            print(f"  删除旧资产 {asset['name']} ({asset.get('size', 0)}B)")
-            status, _ = call(api, f"/repos/{repo}/releases/assets/{asset['id']}", token, method="DELETE")
-            if status not in (204, 200):
-                print(f"::warning::删除失败 {asset['name']} HTTP {status}")
+        print(f"  删除旧资产 {asset['name']} ({asset.get('size', 0)}B)"
+              + ("（同名替换）" if asset["name"] in wanted else ""))
+        status, payload = call(api, f"/repos/{repo}/releases/{release_id}/assets/{asset['id']}",
+                               token, method="DELETE")
+        if status not in (204, 200):
+            fail(f"删除资产失败 {asset['name']}：HTTP {status} {payload!r}"[:600])
 
     # 3) 上传
     for path in files:
