@@ -1,0 +1,172 @@
+# Linux（AppImage）自建发布线 —— 跑在自有 Gitea 的 runner 上。
+#
+# 与 .github/workflows/build-desktop.yml 的分工：
+#   - GitHub 那条继续出 macOS 包，保留作公开备份与 mac 的更新源；
+#   - 这里只出 linux-x64 的 AppImage，产物发到本仓库 Release（固定 tag `ci-linux`、
+#     固定文件名），于是下载地址永久稳定，内网直连不绕 GitHub。
+#
+# 四条硬约束（前三条在 x-md 那条线上踩过，第四条是本项目特有）：
+#   1. **不能出现 `uses:`**。act_runner 会先去 github.com 拉 action 的仓库，
+#      这个容器拉不到，任务会在 checkout 之前就挂掉。checkout 用普通 git clone。
+#   2. 出公网只能走宿主机上的 Clash 代理（192.168.31.26:7890）；容器里没有代理环境变量，
+#      必须显式导出，且内网地址要进 no_proxy，否则连 Gitea 自己都会被绕进代理。
+#   3. 二进制（Electron / electron-builder 工具）与 npm 都走国内镜像，
+#      这条线不需要 GitHub 的 CDN，慢和断都在那里。
+#   4. 补丁只在构建期应用、用完即弃 —— 工作树与上游保持逐字节一致，
+#      `sync-upstream` 的 rebase 因此永远能跑（同 GitHub 线）。
+#
+# 失败排障顺序：先看「探网」那步的四个码，再看「应用构建期补丁」的 git apply 输出，
+# 最后才是构建本身。上游改了这 15 个文件中的任何一个，补丁都会在那里响亮失败。
+
+name: Build Linux AppImage
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: dsh-linux-build
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+
+    steps:
+      - name: 探网（容器能看见什么）
+        shell: bash
+        run: |
+          set -uo pipefail
+          PROXY="http://192.168.31.26:7890"
+          echo "--- 直连 vs 代理 ---"
+          for u in "https://gitea.xingheng.work/api/v1/version" "https://registry.npmmirror.com/electron" "https://github.com"; do
+            printf "  %-50s " "$u"
+            printf "direct=%s " "$(curl -s -o /dev/null -m 8 -w '%{http_code}' "$u" || echo FAIL)"
+            printf "proxy=%s\n" "$(curl -s -o /dev/null -m 15 -x "$PROXY" -w '%{http_code}' "$u" || echo FAIL)"
+          done
+
+      - name: 配置代理与镜像
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROXY="http://192.168.31.26:7890"
+          {
+            echo "http_proxy=$PROXY"
+            echo "https_proxy=$PROXY"
+            echo "HTTP_PROXY=$PROXY"
+            echo "HTTPS_PROXY=$PROXY"
+            echo "no_proxy=localhost,127.0.0.1,192.168.31.26,192.168.0.0/16,10.0.0.0/8,.cn,gitea.xingheng.work"
+            echo "NO_PROXY=localhost,127.0.0.1,192.168.31.26,192.168.0.0/16,10.0.0.0/8,.cn,gitea.xingheng.work"
+            echo "ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/"
+            echo "ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/"
+            echo "npm_config_registry=https://registry.npmmirror.com"
+            echo "DSH_DESKTOP_NPM_REGISTRY=https://registry.npmmirror.com"
+            # Node 的 fetch 默认不认代理环境变量，运行时资源（node/python 包、Python 轮子）
+            # 是靠 fetch 下的；不开这个开关，pythonhosted 那一批会直接超时 5 分钟然后整个构建失败。
+            echo "NODE_USE_ENV_PROXY=1"
+          } >> "$GITHUB_ENV"
+
+      - name: 检代码
+        shell: bash
+        env:
+          REPO_TOKEN: ${{ secrets.REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          rm -rf /root/dsh
+          git clone --depth 1 --branch master \
+            "https://hunterxing:${REPO_TOKEN}@gitea.xingheng.work/${GITHUB_REPOSITORY}.git" /root/dsh
+          cd /root/dsh
+          git log --oneline -1
+
+      - name: 装 pnpm
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install -g pnpm@11.28.5
+          node --version
+          pnpm --version
+
+      - name: 装依赖
+        shell: bash
+        working-directory: /root/dsh
+        run: |
+          set -euo pipefail
+          pnpm config set registry https://registry.npmmirror.com
+          pnpm install --frozen-lockfile
+
+      - name: 应用构建期补丁
+        shell: bash
+        working-directory: /root/dsh
+        run: |
+          set -euo pipefail
+          git apply --check -p1 .ci/unsigned-macos.patch
+          git apply -p1 .ci/unsigned-macos.patch
+          git apply --check -p1 .ci/linux.patch
+          git apply -p1 .ci/linux.patch
+          # 断言补丁真的改到了目标位置：git apply 成功但 hunk 落在别处这种事不该发生，
+          # 一旦发生就会静默跑出一条「没有 linux 目标」的流水线，所以这里硬校验。
+          grep -q "'linux-x64': {" apps/desktop/scripts/package-target.ts
+          grep -q "process.platform === 'darwin' ? 'Electron.app/Contents/MacOS/Electron' : 'electron'" apps/desktop/scripts/prepare-dsh.ts
+          git --no-pager diff --stat
+
+      - name: 构建 AppImage
+        shell: bash
+        working-directory: /root/dsh
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./apps/desktop/package.json').version").$(date -u +%Y%m%d).${GITHUB_RUN_NUMBER}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo ">>> build version: $VERSION"
+          pnpm --filter @deepseek-ai/dsh-desktop exec tsx scripts/package-target.ts \
+            linux-x64 --unsigned --build-version "$VERSION"
+
+      - name: 收产物
+        shell: bash
+        working-directory: /root/dsh
+        run: |
+          set -euo pipefail
+          rm -rf out
+          mkdir -p out
+          APPIMAGE="$(find apps/desktop/.desktop-build/targets/linux-x64 -name '*.AppImage' -type f | head -1)"
+          if [ -z "$APPIMAGE" ]; then
+            echo "::error::没找到 AppImage"
+            find apps/desktop/.desktop-build/targets/linux-x64 -maxdepth 2 | head -30
+            exit 1
+          fi
+          echo ">>> 找到产物：$APPIMAGE ($(du -h "$APPIMAGE" | cut -f1))"
+          cp -v "$APPIMAGE" out/dsh-linux-x64.AppImage
+          chmod +x out/dsh-linux-x64.AppImage
+          printf '%s\n' "$VERSION" > out/VERSION.txt
+          ( cd out && sha256sum dsh-linux-x64.AppImage > SHA256SUMS.txt )
+          ls -la out/
+
+      - name: 发布到 Release
+        shell: bash
+        working-directory: /root/dsh
+        env:
+          REPO_TOKEN: ${{ secrets.REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 .ci/publish_gitea_release.py \
+            --api "https://gitea.xingheng.work/api/v1" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --tag ci-linux \
+            --title "linux-x64 ${VERSION}" \
+            --version "${VERSION}" \
+            --files out/dsh-linux-x64.AppImage out/VERSION.txt out/SHA256SUMS.txt
+
+      - name: 摘要
+        shell: bash
+        run: |
+          set -euo pipefail
+          # act_runner 不一定给 GITHUB_STEP_SUMMARY，没有就退到 /dev/null
+          : "${GITHUB_STEP_SUMMARY:=/dev/null}"
+          {
+            echo "### Linux 包已发布"
+            echo ""
+            echo "- 版本：\`${VERSION}\`"
+            echo "- 下载：https://gitea.xingheng.work/hunterxing/deepseek-harness/releases/download/ci-linux/dsh-linux-x64.AppImage"
+            echo "- 校验：同目录 SHA256SUMS.txt"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
