@@ -195,3 +195,19 @@ Linux 包的独立发布线，跑在自有 Gitea（`gitea.xingheng.work`）的 r
 | 构建镜像 | `builder/Dockerfile`（`x-md-runner:rust` + Electron 运行时库），`docker build --network host -t dsh-linux-builder:1 builder/` |
 | repo secret | `REPO_TOKEN`（仓库读写，clone 与发 Release 都用它）、`DSH_API_BASE`（内网 API 基址；公网域名推大文件会被重置，且这个地址不该进公开文件） |
 | 同步任务 | `~/.hermes/scripts/dsh-gitea-sync.sh`（Hermes cron `dsh-gitea-sync`，每 2 小时，静默同步） |
+
+## Linux 包怎么装（跑起来只要两步）
+
+```sh
+# 内网（快，25MB/s 级）
+curl -fL -o dsh-linux-x64.AppImage \
+  http://192.168.31.26:3080/hunterxing/deepseek-harness/releases/download/ci-linux/dsh-linux-x64.AppImage
+# 公网（受 CVM 上行限制，实测约 200KB/s）
+curl -fL -o dsh-linux-x64.AppImage \
+  https://gitea.xingheng.work/hunterxing/deepseek-harness/releases/download/ci-linux/dsh-linux-x64.AppImage
+
+chmod +x dsh-linux-x64.AppImage     # 必须：curl 下载不带可执行位
+./dsh-linux-x64.AppImage            # Debian 中枢实测直接能起，不需要 --no-sandbox
+```
+
+校验：同目录 `SHA256SUMS.txt` + `VERSION.txt`；`sha256sum -c SHA256SUMS.txt` 应输出「成功」。
