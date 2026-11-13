@@ -23,10 +23,15 @@
 **feed 地址怎么来的（2026-11-13 变更）**：上游提交 `3e6916a2d3`（「isolate publisher
 workspace for lightweight rollout」）把 `desktop-auto-update-environment.mjs` 整文件
 `R100` 搬到 `apps/desktop-publisher/src/`，补丁原来在那个文件里插 `feedUrlOverride`
-分支的做法因此失效（`git apply` 直接 `No such file or directory`）。现在改为在
-`electron-builder-config.mjs` 里对 `resolveDesktopAutoUpdateConfig()` 的返回值做
-`{ ...resolvedUpdate, publicUrl: ci-<target>/ }` 覆盖——用上游同一个解析函数的
-`target`，不复制它的校验逻辑。
+分支的做法因此失效（`git apply` 直接 `No such file or directory`）。
+
+现在改成在 `electron-builder-config.mjs` 里**不调** `resolveDesktopAutoUpdateConfig()`，
+只用上游的 `resolveDesktopAutoUpdateTarget()` 拿到 target，再自造 `{target, channel,
+publicUrl}` 对象。中间试过「调上游解析函数再覆盖 publicUrl」，CI 上失败：上游该函数
+无论是否需要 publicUrl，都会先强制要 `DOWNLOAD_TEST_ORIGIN` / `DOWNLOAD_TEST_RELEASE_ID`
+（`requiredEnvironmentValue`），而 runner 的 `env` 里没有（这些只在 `.env.macos`
+里、由 `loadDesktopPackageEnvironment` 读进另一个 env 对象）。所以 feed 必须自造，
+别去动上游的校验。
 
 ## `make-blockmap.mjs`
 

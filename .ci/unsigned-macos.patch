@@ -17,11 +17,11 @@ index 1fb787803c..9426354581 100644
    }
 -  const update = unsigned ? undefined : resolveDesktopAutoUpdateConfig(env, resolvedPlatform, resolvedArch)
 +  // [dsh-local] 未签名构建也要写出 app-update.yml，否则内置更新器因 enabled() 判空而整体停用。
-+  // [dsh-local] 上游只认 COS 前缀布局的 publicUrl；本 fork 的产物发在 GitHub Release，
-+  // 每个 target 一个固定 tag、附件平铺，所以 origin / keyPrefix 保留，只把 publicUrl 改指过去。
-+  const resolvedUpdate = resolveDesktopAutoUpdateConfig(env, resolvedPlatform, resolvedArch)
++  // [dsh-local] 本 fork 把产物发在 GitHub Release（每个 target 一个固定 tag、附件平铺），
++  // 而上游的 publicUrl 是 COS 目录布局 + 必须的 DOWNLOAD_*_COS_BUCKET 等凭据，runner 上没有。
++  // 所以不调上游的解析函数，feed 直接由 target 推导。
 +  const target = resolveDesktopAutoUpdateTarget(resolvedPlatform, resolvedArch)
-+  const update = { ...resolvedUpdate, publicUrl: `https://github.com/HunterXing/deepseek-harness/releases/download/ci-${target}/` }
++  const update = { target, channel: 'nightly', publicUrl: `https://github.com/HunterXing/deepseek-harness/releases/download/ci-${target}/` }
    if (preparedRuntime !== undefined) buildPaths.dsh = preparedRuntime
    // electron-builder merges extraMetadata into the packaged manifest, so a build version here reaches
    // the artifact names, the update feed, and the installed app.getVersion() the updater compares against.
