@@ -128,11 +128,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # 三个平台都要打：补丁里的 desktop-auto-update-environment.mjs 提供了按 target
-          # 推导的 feed 默认值，Windows 同样依赖它，且该文件是 SHARED_SETTING 白名单
-          # 不允许通过 .env 注入的。仓库 .gitattributes 强制 eol=lf，Windows 上
-          # checkout 出来的就是 LF，git apply 不会因 CRLF 失败。
-          # 上游一旦改动这 8 个文件，这里会响亮失败——这是刻意设计：
+          # 三个平台都要打：补丁在 electron-builder-config.mjs 里把 feed 的 publicUrl 改指
+          # 本仓库的固定 Release（每个 target 一个 tag，附件平铺），Windows 同样依赖它。
+          # 仓库 .gitattributes 强制 eol=lf，Windows 上 checkout 出来的就是 LF，
+          # git apply 不会因 CRLF 失败。
+          # 上游一旦改动这 5 个文件，这里会响亮失败——这是刻意设计：
           # 宁可构建中止，也不要产出一个悄悄跑偏的包。修复办法见 .ci/README.md
           # set -e 是关键：没有它，git apply 失败后步骤照样「成功」，
           # 构建会带着未打补丁的源码跑完，产出一个看起来正常但功能缺失的包。
@@ -140,20 +140,22 @@ jobs:
           git apply -p1 .ci/unsigned-macos.patch
           echo "已打补丁的文件："
           git status --porcelain | grep -E '^( M|\?\?)' | sed 's/^/  /'
-          # 逐个核对补丁声明的 6 个路径。不能用「数一下有多少个改动文件」代替：
+          # 逐个核对补丁声明的 5 个路径。不能用「数一下有多少个改动文件」代替：
           # 新增的 update-replace.ts 在 git status 里是 ?? 而不是 M，
           # 计数会把补丁整体少算一个，断言自己就成了摆设。
           #
           # 2026-10-10：原为 9 个路径。package-target / prepare-dsh /
           # smoke-packaged-runtime 的免签名 hunk 已由上游自己实现并重写，丢弃。
+          # 2026-11-13：上游把 desktop-auto-update-environment.mjs 整文件搬到
+          # apps/desktop-publisher/src/（轻量 rollout 隔离），补丁不再改它；
+          # feed 的 publicUrl 改在 electron-builder-config.mjs 里覆盖。
           # electron-builder-config 只留「免签名也要写 app-update.yml」这一条
           # —— 上游仍是 unsigned ? undefined : ...，去掉会让免签名包的
           # 内置更新器因 enabled() 判空而整体停用（OTA 不通）。
           # 保留的是 dsh 独有能力：自研 bundle 替换、HTTP/2 与 QUIC 禁用、
           # Windows tar 路径修复、更新 feed 地址推导。
           MISSING=0
-          for f in apps/desktop/scripts/desktop-auto-update-environment.mjs \
-                   apps/desktop/scripts/electron-builder-config.mjs \
+          for f in apps/desktop/scripts/electron-builder-config.mjs \
                    apps/desktop/scripts/prepare-package-set.ts \
                    apps/desktop/src/main.ts \
                    apps/desktop/src/update-coordinator.ts \
@@ -164,7 +166,7 @@ jobs:
             fi
           done
           if [ "$MISSING" -ne 0 ]; then
-            echo "::error::补丁声明的 6 个文件里有 $MISSING 个未被改动，补丁与预期不符"
+            echo "::error::补丁声明的 5 个文件里有 $MISSING 个未被改动，补丁与预期不符"
             exit 1
           fi
           for f in apps/desktop/scripts/electron-builder-config.mjs \

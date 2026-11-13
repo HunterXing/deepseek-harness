@@ -1,46 +1,27 @@
-diff --git a/apps/desktop/scripts/desktop-auto-update-environment.mjs b/apps/desktop/scripts/desktop-auto-update-environment.mjs
---- a/apps/desktop/scripts/desktop-auto-update-environment.mjs
-+++ b/apps/desktop/scripts/desktop-auto-update-environment.mjs
-@@ -131,6 +131,28 @@
-   const environment = resolveDesktopAutoUpdateEnvironment(env)
-   const target = resolveDesktopAutoUpdateTarget(platform, arch)
-   const deployment = UPDATE_ENVIRONMENTS[environment]
-+  // [dsh-local] 允许直接指定扁平 feed 地址。GitHub Release 的附件是平铺的，
-+  // 没有 dsh-desk/<releaseId>/feeds/<target>/ 这类目录层级，而 origin 校验又要求
-+  // pathname === '/'。设了这个变量就直接用它当 publicUrl，跳过 origin/前缀拼装。
-+  // [dsh-local] 默认指向自建仓库的固定 Release（每个架构一个 tag，附件平铺，正好当 feed）。
-+  // 允许用环境变量覆盖；此时 target 已在作用域内（mac-x64 / mac-arm64 / win-x64）。
-+  const feedUrlOverride = env.DSH_DESKTOP_UPDATE_FEED_URL
-+    ?? `https://github.com/HunterXing/deepseek-harness/releases/download/ci-${target}/`
-+  if (feedUrlOverride !== undefined && feedUrlOverride !== '') {
-+    const override = new URL(feedUrlOverride)
-+    if (override.protocol !== 'https:' || !override.pathname.endsWith('/')) {
-+      throw new Error('desktop auto-update: DSH_DESKTOP_UPDATE_FEED_URL must be an https URL ending with /')
-+    }
-+    return {
-+      environment,
-+      target,
-+      origin: override.origin,
-+      channel,
-+      keyPrefix: `${target}/feeds`,
-+      binaryKeyPrefix: `${target}/bin`,
-+      publicUrl: feedUrlOverride,
-+    }
-+  }
-   let origin = deployment.fixedOrigin
-   if (origin === undefined) {
-     const { originEnvName } = deployment
 diff --git a/apps/desktop/scripts/electron-builder-config.mjs b/apps/desktop/scripts/electron-builder-config.mjs
 index 1fb787803c..9426354581 100644
 --- a/apps/desktop/scripts/electron-builder-config.mjs
 +++ b/apps/desktop/scripts/electron-builder-config.mjs
-@@ -90,7 +88,8 @@ export function createElectronBuilderConfig(
+@@ -20,7 +20,7 @@
+   resolveWindowsUpdatePublisher,
+   scrubWindowsSigningEnvironment,
+ } from './windows-sign.mjs'
+-import { resolveDesktopAutoUpdateConfig } from '@deepseek-ai/dsh-desktop-publisher/desktop-auto-update-environment.mjs'
++import { resolveDesktopAutoUpdateConfig, resolveDesktopAutoUpdateTarget } from '@deepseek-ai/dsh-desktop-publisher/desktop-auto-update-environment.mjs'
+ import { resolveDesktopBuildCommit } from './desktop-build-commit.mjs'
+ import { resolveDesktopBuildVersion } from './desktop-build-version.mjs'
+ import { resolveDesktopPolicyEnvironment } from './desktop-policy-environment.mjs'
+@@ -90,7 +90,12 @@
    if (windowsSigner !== undefined) {
      installWindowsNsisBootstrapSigner({ sign: windowsSigner })
    }
 -  const update = unsigned ? undefined : resolveDesktopAutoUpdateConfig(env, resolvedPlatform, resolvedArch)
 +  // [dsh-local] 未签名构建也要写出 app-update.yml，否则内置更新器因 enabled() 判空而整体停用。
-+  const update = resolveDesktopAutoUpdateConfig(env, resolvedPlatform, resolvedArch)
++  // [dsh-local] 上游只认 COS 前缀布局的 publicUrl；本 fork 的产物发在 GitHub Release，
++  // 每个 target 一个固定 tag、附件平铺，所以 origin / keyPrefix 保留，只把 publicUrl 改指过去。
++  const resolvedUpdate = resolveDesktopAutoUpdateConfig(env, resolvedPlatform, resolvedArch)
++  const target = resolveDesktopAutoUpdateTarget(resolvedPlatform, resolvedArch)
++  const update = { ...resolvedUpdate, publicUrl: `https://github.com/HunterXing/deepseek-harness/releases/download/ci-${target}/` }
    if (preparedRuntime !== undefined) buildPaths.dsh = preparedRuntime
    // electron-builder merges extraMetadata into the packaged manifest, so a build version here reaches
    // the artifact names, the update feed, and the installed app.getVersion() the updater compares against.
